@@ -1539,18 +1539,19 @@ static pseudo_t linearize_call_expression(struct entrypoint *ep, struct expressi
 	add_one_insn(ep, insn);
 
 	if (ctype) {
+		struct basic_block *post_call = NULL;
+
 		FOR_EACH_PTR(ctype->contexts, context) {
 			int in = context->in;
 			int out = context->out;
 			int check = 0;
 			int context_diff;
+
+			if (out < 0)
+				continue;
 			if (in < 0) {
 				check = 1;
 				in = 0;
-			}
-			if (out < 0) {
-				check = 0;
-				out = 0;
 			}
 			context_diff = out - in;
 			if (check || context_diff) {
@@ -1561,6 +1562,39 @@ static pseudo_t linearize_call_expression(struct entrypoint *ep, struct expressi
 				add_one_insn(ep, insn);
 			}
 		} END_FOR_EACH_PTR(context);
+
+		FOR_EACH_PTR(ctype->contexts, context) {
+			int in = context->in;
+			int out = context->out;
+
+			if (out >= 0)
+				continue;
+			if (retval == VOID) {
+				warning(expr->pos, "nonsensical conditional output context with no condition");
+				continue;
+			}
+			if (in) {
+				warning(expr->pos, "nonsensical conditional input context");
+				continue;
+			}
+			if (!post_call) {
+				struct basic_block *set_context;
+				post_call = alloc_basic_block(ep, expr->pos);
+				set_context = alloc_basic_block(ep, expr->pos);
+				add_branch(ep, retval, set_context, post_call);
+				set_activeblock(ep, set_context);
+			}
+			insn = alloc_instruction(OP_CONTEXT, 0);
+			insn->increment = -out;
+			insn->check = 0;
+			insn->context_expr = context->context;
+			add_one_insn(ep, insn);
+		} END_FOR_EACH_PTR(context);
+
+		if (post_call) {
+			add_goto(ep, post_call);
+			set_activeblock(ep, post_call);
+		}
 
 		if (ctype->modifiers & MOD_NORETURN)
 			add_unreachable(ep);

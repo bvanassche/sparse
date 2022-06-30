@@ -10,6 +10,10 @@ static void r(void) __attribute__((context(1,0)))
 	__context__(-1);
 }
 
+// Negative output means "conditional positive output"
+extern int cond_get(void) __attribute((context(0,-1)));
+extern void nonsensical_cond_get(void) __attribute((context(0,-1)));
+
 extern int _ca(int fail);
 #define ca(fail) __cond_lock(_ca(fail))
 
@@ -17,6 +21,17 @@ static void good_paired1(void)
 {
 	a();
 	r();
+}
+
+static void good_conditional(void)
+{
+	if (cond_get())
+		r();
+}
+
+static void nonsensical_conditional(void)
+{
+	nonsensical_cond_get();
 }
 
 static void good_paired2(void)
@@ -314,23 +329,81 @@ static void warn_cond_lock1(void)
         condition2 = 1; /* do stuff */
     r();
 }
+
+static int good_trylock_def(int ok) __attribute__((context(0, -1)))
+{
+	if (ok) {
+		__context__(1);
+		return 1;
+	}
+	return 0;
+}
+
+static int good_trylock_wrap(void) __attribute__((context(0, -1)))
+{
+	return cond_get();
+}
+
+static int good_trylock_stub(void) __attribute__((context(0, -1)))
+{
+	return 0;
+}
+
+extern int multi_cond_get(void)
+	__attribute__((context(lock_a, 0, -1)))
+	__attribute__((context(lock_b, 0, 1)));
+static void release_a(void) __attribute__((context(lock_a, 1, 0)))
+{
+	__context__(lock_a, -1);
+}
+static void release_b(void) __attribute__((context(lock_b, 1, 0)))
+{
+	__context__(lock_b, -1);
+}
+static void good_multi_cond(void)
+{
+	if (multi_cond_get())
+		release_a();
+	release_b();
+}
+
+static int warn_trylock_missing(void) __attribute__((context(0, -1)))
+{
+	return 1;
+}
+
+static int warn_trylock_inverted(void) __attribute__((context(0, -1)))
+{
+	__context__(1);
+	return 0;
+}
+
+static int warn_trylock_uncond(int x) __attribute__((context(0, -1)))
+{
+	__context__(1);
+	return x;
+}
 /*
  * check-name: Check -Wcontext
  *
  * check-error-start
-context.c:69:13: warning: context imbalance in 'warn_lock1' - wrong count at exit
-context.c:74:13: warning: context imbalance in 'warn_lock2' - wrong count at exit
-context.c:81:13: warning: context imbalance in 'warn_lock3' - wrong count at exit
-context.c:88:13: warning: context imbalance in 'warn_unlock1' - unexpected unlock
-context.c:93:13: warning: context imbalance in 'warn_unlock2' - unexpected unlock
-context.c:131:12: warning: context imbalance in 'warn_if1' - wrong count at exit
-context.c:140:12: warning: context imbalance in 'warn_if2' - different lock contexts for basic block
-context.c:202:9: warning: context imbalance in 'warn_while1' - different lock contexts for basic block
-context.c:210:17: warning: context imbalance in 'warn_while2' - unexpected unlock
-context.c:216:9: warning: context imbalance in 'warn_while3' - wrong count at exit
-context.c:274:13: warning: context imbalance in 'warn_goto1' - wrong count at exit
-context.c:283:13: warning: context imbalance in 'warn_goto2' - wrong count at exit
-context.c:300:5: warning: context imbalance in 'warn_goto3' - different lock contexts for basic block
-context.c:315:5: warning: context imbalance in 'warn_cond_lock1' - different lock contexts for basic block
+context.c:34:29: warning: nonsensical conditional output context with no condition
+context.c:84:13: warning: context imbalance in 'warn_lock1' - wrong count at exit
+context.c:89:13: warning: context imbalance in 'warn_lock2' - wrong count at exit
+context.c:96:13: warning: context imbalance in 'warn_lock3' - wrong count at exit
+context.c:103:13: warning: context imbalance in 'warn_unlock1' - unexpected unlock
+context.c:108:13: warning: context imbalance in 'warn_unlock2' - unexpected unlock
+context.c:146:12: warning: context imbalance in 'warn_if1' - wrong count at exit
+context.c:155:12: warning: context imbalance in 'warn_if2' - different lock contexts for basic block
+context.c:217:9: warning: context imbalance in 'warn_while1' - different lock contexts for basic block
+context.c:225:17: warning: context imbalance in 'warn_while2' - unexpected unlock
+context.c:231:9: warning: context imbalance in 'warn_while3' - wrong count at exit
+context.c:289:13: warning: context imbalance in 'warn_goto1' - wrong count at exit
+context.c:298:13: warning: context imbalance in 'warn_goto2' - wrong count at exit
+context.c:315:5: warning: context imbalance in 'warn_goto3' - different lock contexts for basic block
+context.c:330:5: warning: context imbalance in 'warn_cond_lock1' - different lock contexts for basic block
+context.c:370:12: warning: context imbalance in 'warn_trylock_missing' - wrong count at exit
+context.c:375:12: warning: context imbalance in 'warn_trylock_inverted' - wrong count at exit
+context.c:381:12: warning: context imbalance in 'warn_trylock_uncond' - wrong count at exit
  * check-error-end
  */

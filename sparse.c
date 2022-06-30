@@ -79,9 +79,168 @@ static int imbalance(struct entrypoint *ep, struct basic_block *bb, int entry, i
 	return -1;
 }
 
-static int check_bb_context(struct entrypoint *ep, struct basic_block *bb, int entry, int exit);
+struct cond_context_state {
+	int cond_out;
+	bool saw_base_out;
+	bool saw_cond_out;
+	bool all_zero;
+	bool all_nonzero;
+	struct basic_block *any_exit_bb;
+};
 
-static int check_children(struct entrypoint *ep, struct basic_block *bb, int entry, int exit)
+static bool is_pure_return_bb(struct basic_block *bb)
+{
+	struct instruction *insn, *last = NULL;
+
+	if (!bb)
+		return false;
+	FOR_EACH_PTR(bb->insns, insn) {
+		if (!insn->bb)
+			continue;
+		if (insn->opcode == OP_CONTEXT || insn->opcode == OP_CALL ||
+		    insn->opcode == OP_INLINED_CALL || insn->opcode == OP_ASM)
+			return false;
+		last = insn;
+	} END_FOR_EACH_PTR(insn);
+	return last && last->opcode == OP_RET;
+}
+
+static int known_cond_on_edge(pseudo_t cond, struct basic_block *from, struct basic_block *to)
+{
+	int hops;
+
+	for (hops = 0; from && to && hops < 4; hops++) {
+		struct instruction *br = last_instruction(from->insns);
+		if (br && br->opcode == OP_CBR && br->cond == cond &&
+		    br->bb_true != br->bb_false) {
+			if (to == br->bb_true)
+				return 1;
+			if (to == br->bb_false)
+				return 0;
+		}
+		if (ptr_list_size((struct ptr_list *)from->parents) != 1)
+			break;
+		to = from;
+		from = first_basic_block(from->parents);
+		if (from == to)
+			break;
+	}
+	return -1;
+}
+
+static int return_truth_on_edge(pseudo_t val, struct basic_block *from,
+				struct basic_block *ret_bb, int depth)
+{
+	struct instruction *def;
+	int known;
+
+	if (!val || val == VOID || depth > 8)
+		return -1;
+	if (val->type == PSEUDO_VAL)
+		return val->value != 0 ? 1 : 0;
+
+	known = known_cond_on_edge(val, from, ret_bb);
+	if (known >= 0)
+		return known;
+
+	if (val->type != PSEUDO_REG && val->type != PSEUDO_PHI)
+		return -1;
+	def = val->def;
+	if (!def)
+		return -1;
+
+	switch (def->opcode) {
+	case OP_PHI: {
+		struct basic_block *cur = from;
+		int hops;
+		for (hops = 0; cur && hops < 4; hops++) {
+			pseudo_t phi;
+			FOR_EACH_PTR(def->phi_list, phi) {
+				if (!phi || phi == VOID || !phi->def)
+					continue;
+				if (phi->def->bb == cur)
+					return return_truth_on_edge(phi->def->phi_src,
+								    cur, ret_bb, depth + 1);
+			} END_FOR_EACH_PTR(phi);
+			if (ptr_list_size((struct ptr_list *)cur->parents) != 1)
+				break;
+			cur = first_basic_block(cur->parents);
+		}
+		return -1;
+	}
+	case OP_PHISOURCE:
+		return return_truth_on_edge(def->phi_src, def->bb, ret_bb, depth + 1);
+	case OP_ZEXT:
+	case OP_SEXT:
+		if (def->orig_type && def->size >= def->orig_type->bit_size)
+			return return_truth_on_edge(def->src, from, ret_bb, depth + 1);
+		return -1;
+	case OP_SET_EQ:
+		if (def->src2 && def->src2->type == PSEUDO_VAL && def->src2->value == 0) {
+			int t = return_truth_on_edge(def->src1, from, ret_bb, depth + 1);
+			return t >= 0 ? !t : -1;
+		}
+		return -1;
+	case OP_SET_NE:
+		if (def->src2 && def->src2->type == PSEUDO_VAL && def->src2->value == 0)
+			return return_truth_on_edge(def->src1, from, ret_bb, depth + 1);
+		return -1;
+	case OP_SEL: {
+		int ct = return_truth_on_edge(def->cond, from, ret_bb, depth + 1);
+		int tt, ft;
+		if (ct == 1)
+			return return_truth_on_edge(def->src2, from, ret_bb, depth + 1);
+		if (ct == 0)
+			return return_truth_on_edge(def->src3, from, ret_bb, depth + 1);
+		tt = return_truth_on_edge(def->src2, from, ret_bb, depth + 1);
+		ft = return_truth_on_edge(def->src3, from, ret_bb, depth + 1);
+		return (tt >= 0 && tt == ft) ? tt : -1;
+	}
+	default:
+		return -1;
+	}
+}
+
+static int check_exit_edge(struct entrypoint *ep, struct basic_block *from,
+			   struct basic_block *ret_bb, struct instruction *ret_insn,
+			   int entry, int exit, struct cond_context_state *cs)
+{
+	struct basic_block *diag_bb = from ? from : ret_bb;
+	int truth;
+
+	if (!cs || !cs->cond_out)
+		return entry != exit ? imbalance(ep, ret_bb, entry, exit, "wrong count at exit") : 0;
+
+	if (!ret_insn->src || ret_insn->src == VOID)
+		return imbalance(ep, diag_bb, entry, exit + cs->cond_out, "wrong count at exit");
+
+	truth = return_truth_on_edge(ret_insn->src, from, ret_bb, 0);
+	if (!cs->any_exit_bb)
+		cs->any_exit_bb = diag_bb;
+	if (entry == exit)
+		cs->saw_base_out = true;
+	if (entry == exit + cs->cond_out)
+		cs->saw_cond_out = true;
+	if (truth != 0)
+		cs->all_zero = false;
+	if (truth != 1)
+		cs->all_nonzero = false;
+
+	if (truth == 0)
+		return entry != exit ? imbalance(ep, diag_bb, entry, exit, "wrong count at exit") : 0;
+	if (truth == 1)
+		return entry != exit + cs->cond_out ?
+			imbalance(ep, diag_bb, entry, exit + cs->cond_out, "wrong count at exit") : 0;
+	if (entry != exit && entry != exit + cs->cond_out)
+		return imbalance(ep, diag_bb, entry, exit, "wrong count at exit");
+	return 0;
+}
+
+static int check_bb_context(struct entrypoint *ep, struct basic_block *bb,
+			    int entry, int exit, struct cond_context_state *cs);
+
+static int check_children(struct entrypoint *ep, struct basic_block *bb,
+			  int entry, int exit, struct cond_context_state *cs)
 {
 	struct instruction *insn;
 	struct basic_block *child;
@@ -90,16 +249,23 @@ static int check_children(struct entrypoint *ep, struct basic_block *bb, int ent
 	if (!insn)
 		return 0;
 	if (insn->opcode == OP_RET)
-		return entry != exit ? imbalance(ep, bb, entry, exit, "wrong count at exit") : 0;
+		return check_exit_edge(ep, NULL, bb, insn, entry, exit, cs);
 
 	FOR_EACH_PTR(bb->children, child) {
-		if (check_bb_context(ep, child, entry, exit))
+		if (cs && cs->cond_out && is_pure_return_bb(child)) {
+			if (check_exit_edge(ep, bb, child, last_instruction(child->insns),
+					    entry, exit, cs))
+				return -1;
+			continue;
+		}
+		if (check_bb_context(ep, child, entry, exit, cs))
 			return -1;
 	} END_FOR_EACH_PTR(child);
 	return 0;
 }
 
-static int check_bb_context(struct entrypoint *ep, struct basic_block *bb, int entry, int exit)
+static int check_bb_context(struct entrypoint *ep, struct basic_block *bb,
+			    int entry, int exit, struct cond_context_state *cs)
 {
 	if (!bb)
 		return 0;
@@ -115,7 +281,7 @@ static int check_bb_context(struct entrypoint *ep, struct basic_block *bb, int e
 	if (entry < 0)
 		return imbalance(ep, bb, entry, exit, "unexpected unlock");
 
-	return check_children(ep, bb, entry, exit);
+	return check_children(ep, bb, entry, exit, cs);
 }
 
 static void check_cast_instruction(struct instruction *insn)
@@ -260,11 +426,29 @@ static void check_context(struct entrypoint *ep)
 
 	check_instructions(ep);
 
+	struct cond_context_state cs = {
+		.all_zero = true,
+		.all_nonzero = true,
+	};
+
 	FOR_EACH_PTR(sym->ctype.contexts, context) {
-		in_context += context->in;
-		out_context += context->out;
+		int in = context->in;
+		int out = context->out;
+
+		if (in > 0)
+			in_context += in;
+		if (out > 0)
+			out_context += out;
+		else if (out < 0)
+			cs.cond_out += -out;
 	} END_FOR_EACH_PTR(context);
-	check_bb_context(ep, ep->entry->bb, in_context, out_context);
+	if (!check_bb_context(ep, ep->entry->bb, in_context, out_context, &cs) &&
+	    cs.cond_out > 0 && cs.any_exit_bb) {
+		if ((!cs.all_zero && !cs.saw_cond_out) ||
+		    (!cs.all_nonzero && !cs.saw_base_out))
+			imbalance(ep, cs.any_exit_bb, in_context,
+				  out_context + cs.cond_out, "wrong count at exit");
+	}
 }
 
 /* list_compound_symbol - symbol info for arrays, structures, unions */
