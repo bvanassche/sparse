@@ -30,6 +30,24 @@ static be16 test_narrow_all_bits(void)
 	return a | b;
 }
 
+static int test_ordered_compare(be32 x, be16 y)
+{
+	int res = 0;
+	if (x > 0)
+		res++;
+	if (x <= 0)
+		res++;
+	if (0 < x)
+		res++;
+	if (0 >= x)
+		res++;
+	if (x < ~0)
+		res++;
+	if (y <= 0xffff)
+		res++;
+	return res;
+}
+
 /*
  * check-name: bitwise-all-bits-and-casts
  * check-command: sparse -Wbitwise $file
