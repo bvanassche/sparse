@@ -44,6 +44,7 @@
 #include "expression.h"
 #include "evaluate.h"
 #include "expand.h"
+#include "simplify.h"
 
 
 static int expand_expression(struct expression *);
@@ -817,12 +818,23 @@ static int expand_dereference(struct expression *expr)
 	return UNSAFE;
 }
 
-static int simplify_preop(struct expression *expr)
+/*
+ * We want to do certain trivial constant simplifications
+ * early at the type evaluation stage, because those can
+ * depend on specific constants (ie ~0 is ok for restricted
+ * types).
+ *
+ * Return >0 for successful simplification, 0 for none,
+ * and <0 for "not simplified due to overflow".
+ */
+int early_simplify_preop(struct expression *expr)
 {
 	struct expression *op = expr->unop;
 	unsigned long long v, mask;
 
 	if (op->type != EXPR_VALUE)
+		return 0;
+	if (!expr->ctype || expr->ctype->bit_size <= 0 || expr->ctype->bit_size > 64)
 		return 0;
 
 	mask = sign_bit(expr->ctype->bit_size);
@@ -831,7 +843,7 @@ static int simplify_preop(struct expression *expr)
 	case '+': break;
 	case '-':
 		if (v == mask && !(expr->ctype->ctype.modifiers & MOD_UNSIGNED))
-			goto Overflow;
+			return -1;
 		v = -v;
 		break;
 	case '!': v = !v; break;
@@ -843,11 +855,18 @@ static int simplify_preop(struct expression *expr)
 	expr->type = EXPR_VALUE;
 	expr->taint = op->taint;
 	return 1;
+}
 
-Overflow:
-	if (!conservative)
-		warning(expr->pos, "constant integer operation overflow");
-	return 0;
+static int simplify_preop(struct expression *expr)
+{
+	int simplified = early_simplify_preop(expr);
+
+	if (simplified < 0) {
+		if (!conservative)
+			warning(expr->pos, "constant integer operation overflow");
+		simplified = 0;
+	}
+	return simplified;
 }
 
 static int simplify_float_preop(struct expression *expr)

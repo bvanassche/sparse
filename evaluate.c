@@ -35,6 +35,7 @@
 #include <limits.h>
 
 #include "evaluate.h"
+#include "simplify.h"
 #include "lib.h"
 #include "allocate.h"
 #include "bits.h"
@@ -1944,10 +1945,21 @@ Normal:
 	} else {
 		return bad_expr_type(expr);
 	}
-	if (expr->op == '+')
+	if (expr->op == '+') {
 		*expr = *expr->unop;
+		expr->flags = flags;
+		expr->ctype = ctype;
+		return ctype;
+	}
 	expr->flags = flags;
 	expr->ctype = ctype;
+
+	/*
+	 * We simplify sign ops of constants early, turning
+	 * a constant with a sign into just a plain constant
+	 * rather than a preop.
+	 */
+	early_simplify_preop(expr);
 	return ctype;
 Restr:
 	if (restricted_unop(expr->op, &ctype))
