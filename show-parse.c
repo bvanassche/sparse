@@ -336,7 +336,8 @@ deeper:
 		if (as)
 			prepend(name, "%s ", show_as(as));
 
-		if (sym->type == SYM_BASETYPE || sym->type == SYM_ENUM)
+		if (sym->type == SYM_BASETYPE || sym->type == SYM_ENUM ||
+		    sym->type == SYM_RESTRICT)
 			mod &= ~MOD_SPECIFIER;
 		s = modifier_string(mod);
 		prepend(name, "%s", s);
