@@ -465,7 +465,19 @@ static int restricted_value(struct expression *v, struct symbol *type)
 	return 0;
 }
 
-static int restricted_binop(int op, struct symbol *type)
+/*
+ * Bitwise types can do ordered comparisons with
+ * the unrestricted values, but not in general
+ */
+static bool can_order(struct symbol *type, struct expression *left, struct expression *right)
+{
+	if (!is_unsigned_restricted_or_int(type))
+		return false;
+	return !restricted_value(left, type) ||
+		!restricted_value(right, type);
+}
+
+static int restricted_binop(int op, struct symbol *type, struct expression *left, struct expression *right)
 {
 	switch (op) {
 		case '&':
@@ -478,6 +490,13 @@ static int restricted_binop(int op, struct symbol *type)
 		case '^':
 		case '?':
 			return 2;	/* keep fouled */
+		case '<':
+		case '>':
+		case SPECIAL_LTE:
+		case SPECIAL_GTE:
+			if (can_order(type, left, right))
+				return 3;
+			return 0;
 		case SPECIAL_EQUAL:
 		case SPECIAL_NOTEQUAL:
 			return 3;	/* warn if fouled */
@@ -530,7 +549,7 @@ static struct symbol *restricted_binop_type(int op,
 		ctype = rtype;
 
 	if (ctype) {
-		switch (restricted_binop(op, ctype)) {
+		switch (restricted_binop(op, ctype, left, right)) {
 		case 1:
 			if ((lclass ^ rclass) & TYPE_FOULED)
 				ctype = unfoul(ctype);
@@ -1364,7 +1383,7 @@ static int evaluate_assign_op(struct expression *expr)
 			return 0;
 		}
 		if (tclass & TYPE_RESTRICT) {
-			if (!restricted_binop(op, t)) {
+			if (!restricted_binop(op, t, expr->left, expr->right)) {
 				warning(expr->pos, "bad assignment (%s) to %s",
 					show_special(op), show_typename(t));
 				expr->right = cast_to(expr->right, target);
