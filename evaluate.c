@@ -2290,7 +2290,7 @@ static struct symbol *evaluate_type_information(struct expression *expr)
 		 * promoted - check that here
 		 */
 		if (is_restricted_type(sym)) {
-			if (sym->bit_size < bits_in_int && is_promoted(expr))
+			if (sym->bit_size < bits_in_int && is_promoted(expr->cast_expression))
 				sym = &int_ctype;
 		} else if (is_fouled_type(sym)) {
 			sym = &int_ctype;

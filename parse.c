@@ -1709,7 +1709,6 @@ static struct token *declaration_specifiers(struct token *token, struct decl_sta
 		}
 		type = alloc_symbol(token->pos, SYM_BASETYPE);
 		*type = *ctx->ctype.base_type;
-		type->ctype.modifiers &= ~MOD_SPECIFIER;
 		type->ctype.base_type = ctx->ctype.base_type;
 		type->type = SYM_RESTRICT;
 		ctx->ctype.base_type = type;

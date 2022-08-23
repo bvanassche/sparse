@@ -125,7 +125,7 @@ SYM_RESTRICT
 Used for bitwise types (aka 'restricted' types):
   * .ctype.base_type points to the underlying type (integer)
   * .ctype.modifiers & .as are like for SYM_NODE and the modifiers
-    are inherited from the base type with MOD_SPECIFIER removed
+    are inherited from the base type
   * .ident is the typedef name (if any).
 
 SYM_FOULED
