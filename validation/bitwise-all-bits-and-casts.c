@@ -10,8 +10,10 @@ static be32 test_all_bits(void)
 	be32 d = 0;
 	be32 e = +0;
 	be32 f = -0;
+	be32 g = (be32)0;
+	be32 i = (be32)~0;
 
-	return a | b | c | d | e | f;
+	return a | b | c | d | e | f | g | i;
 }
 
 static be64 test_all_bits_64(void)
@@ -19,15 +21,19 @@ static be64 test_all_bits_64(void)
 	be64 a = ~0;
 	be64 b = ~0ULL;
 	be64 c = -1;
+	be64 d = (be64)0;
+	be64 f = (be64)~0;
 
-	return a | b | c;
+	return a | b | c | d | f;
 }
 
-static be16 test_narrow_all_bits(void)
+static be16 test_cross_cast_zero(void)
 {
-	be16 a = ~0;
-	be16 b = 0xffff;
-	return a | b;
+	be16 k = (be32)0;
+	be16 m = (be32)~0;
+	be16 o = (unsigned short)~0;
+
+	return k | m | o;
 }
 
 static int test_ordered_compare(be32 x, be16 y)
