@@ -425,12 +425,43 @@ static struct symbol *bad_expr_type(struct expression *expr)
 	return expr->ctype = &bad_ctype;
 }
 
+static bool is_unsigned_restricted_or_int(struct symbol *sym)
+{
+	while (sym) {
+		if (sym->type == SYM_NODE || sym->type == SYM_ENUM ||
+		    sym->type == SYM_RESTRICT || sym->type == SYM_FOULED ||
+		    sym->type == SYM_BITFIELD) {
+			if (sym->ctype.modifiers & MOD_UNSIGNED)
+				return true;
+			sym = sym->ctype.base_type;
+			continue;
+		}
+		break;
+	}
+	return sym && (sym->ctype.modifiers & MOD_UNSIGNED);
+}
+
 static int restricted_value(struct expression *v, struct symbol *type)
 {
 	if (v->type != EXPR_VALUE)
 		return 1;
-	if (v->value != 0)
+	if (v->value != 0) {
+		int vbits = v->ctype ? v->ctype->bit_size : 0;
+		int tbits = type ? type->bit_size : 0;
+		bool vsigned = v->ctype && !is_unsigned_restricted_or_int(v->ctype);
+		unsigned long long uval, tmask, vmask;
+
+		if (vbits <= 0 || tbits <= 0 || vbits > 64 || tbits > 64)
+			return 1;
+		uval = (unsigned long long)bits_extend(v->value, vbits, vsigned);
+		tmask = bits_mask(tbits);
+		vmask = bits_mask(vbits);
+		if (uval == tmask || uval == ~0ULL)
+			return 0;
+		if (vbits >= tbits && (v->value & vmask) == vmask)
+			return 0;
 		return 1;
+	}
 	return 0;
 }
 
