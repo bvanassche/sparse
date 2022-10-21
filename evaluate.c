@@ -443,7 +443,7 @@ static bool is_unsigned_restricted_or_int(struct symbol *sym)
 
 static int restricted_value(struct expression *v, struct symbol *type)
 {
-	if (v->type == EXPR_CAST) {
+	if (v->type == EXPR_CAST || v->type == EXPR_FORCE_CAST) {
 		struct symbol *ctype;
 		int cclass = classify_type(v->ctype, &ctype);
 		struct expression *leaf = v->cast_expression;
@@ -452,7 +452,7 @@ static int restricted_value(struct expression *v, struct symbol *type)
 			return 1;
 		if (restricted_value(v->cast_expression, ctype))
 			return 1;
-		while (leaf && leaf->type == EXPR_CAST)
+		while (leaf && (leaf->type == EXPR_CAST || leaf->type == EXPR_FORCE_CAST))
 			leaf = leaf->cast_expression;
 		if (leaf && leaf->type == EXPR_VALUE && leaf->value == 0)
 			return 0;
