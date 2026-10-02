@@ -35,6 +35,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <time.h>
+#include <errno.h>
 #include <sys/stat.h>
 
 #include "lib.h"
@@ -1661,6 +1662,400 @@ err:
 	return false;
 }
 
+static int open_embed_file(struct stream *stream, const char *filename,
+			   int expect)
+{
+	char fullname[PATH_MAX];
+	const char **path;
+	size_t flen = strlen(filename);
+
+	if (filename[0] == '/')
+		return open(filename, O_RDONLY);
+
+	set_stream_include_path(stream);
+	path = expect ? angle_includepath : quote_includepath;
+	if (!path)
+		return -1;
+	while (*path != NULL) {
+		const char *p = *path++;
+		size_t plen = strlen(p);
+		if (plen + flen + 2 > sizeof(fullname))
+			continue;
+		memcpy(fullname, p, plen);
+		if (plen && p[plen - 1] != '/') {
+			fullname[plen] = '/';
+			plen++;
+		}
+		memcpy(fullname + plen, filename, flen + 1);
+		int fd = open(fullname, O_RDONLY);
+		if (fd >= 0)
+			return fd;
+	}
+	return -1;
+}
+
+static int free_preprocessor_line(struct token *token);
+
+static int handle_embed(struct stream *stream, struct token **line,
+			struct token *token)
+{
+	char filename[PATH_MAX];
+	int expect = 0;
+	struct token *next = token->next;
+	struct token **param_p;
+	struct token *prefix_start = NULL, *prefix_end = NULL;
+	struct token *suffix_start = NULL, *suffix_end = NULL;
+	struct token *if_empty_start = NULL, *if_empty_end = NULL;
+	int has_limit = 0;
+	unsigned long long limit_val = ~0ULL;
+	unsigned int seen_params = 0;
+	int fd;
+	struct stat st;
+	unsigned char *buf = NULL;
+	ssize_t bytes_read = 0;
+	struct token *head = NULL, **tail = &head;
+	static char num_strs[256][4];
+	static int num_strs_inited = 0;
+
+	if (standard < STANDARD_C23 && Wpedantic)
+		warning(token->pos, "#embed before C23 is an extension");
+
+	next = scan_next(&token->next);
+	if (match_op(next, '<')) {
+		expect = '>';
+		next = next->next;
+		if (!collect_angle_filename(&next, filename, sizeof(filename),
+					    token->pos))
+			return 1;
+	} else if (token_type(next) == TOKEN_STRING) {
+		if (!extract_string_filename(&next, filename, sizeof(filename)))
+			return 1;
+	} else {
+		while (token_type(next = scan_next(&token->next)) ==
+			       TOKEN_IDENT &&
+		       !expand_one_symbol(&token->next))
+			;
+		next = scan_next(&token->next);
+		if (match_op(next, '<')) {
+			struct token **p = &next->next;
+			struct token *t;
+
+			while (!eof_token(t = scan_next(p)) &&
+			       !match_op(t, '>')) {
+				if (token_type(t) != TOKEN_IDENT ||
+				    expand_one_symbol(p))
+					p = &t->next;
+			}
+			expect = '>';
+			next = next->next;
+			if (!collect_angle_filename(&next, filename,
+						    sizeof(filename),
+						    token->pos))
+				return 1;
+		} else if (token_type(next) == TOKEN_STRING) {
+			if (!extract_string_filename(&next, filename,
+						     sizeof(filename)))
+				return 1;
+		} else {
+			sparse_error(next->pos,
+				     "expected \"FILENAME\" or <FILENAME>");
+			return 1;
+		}
+	}
+
+	param_p = &next;
+	while (!eof_token(next = scan_next(param_p))) {
+		if (token_type(next) == TOKEN_IDENT) {
+			struct ident *id;
+			struct position id_pos;
+			enum embed_param_kind kind;
+			struct token *pstart, *pend = NULL;
+			int depth = 1;
+
+			if (!expand_one_symbol(param_p))
+				continue;
+			next = *param_p;
+			if (token_type(next) != TOKEN_IDENT) {
+				sparse_error(next->pos,
+					     "unexpected token in #embed");
+				return 1;
+			}
+			id = next->ident;
+			id_pos = next->pos;
+			if (match_op(next->next, ':') &&
+			    match_op(next->next->next, ':')) {
+				struct token *attr = next->next->next->next;
+
+				if (token_type(attr) == TOKEN_IDENT)
+					sparse_error(
+						id_pos,
+						"unknown embed parameter '%s::%s'",
+						show_ident(id),
+						show_ident(attr->ident));
+				else
+					sparse_error(attr->pos,
+						     "identifier expected");
+				return 1;
+			}
+
+			kind = classify_embed_param(id);
+			if (kind == EMBED_PARAM_NONE) {
+				sparse_error(id_pos,
+					     "unknown embed parameter '%s'",
+					     show_ident(id));
+				return 1;
+			}
+			if (seen_params & kind) {
+				sparse_error(id_pos,
+					     "duplicate embed parameter '%s'",
+					     show_ident(id));
+				return 1;
+			}
+			seen_params |= kind;
+
+			next = scan_next(&next->next);
+			if (!match_op(next, '(')) {
+				sparse_error(id_pos, "expected '(' after '%s'",
+					     show_ident(id));
+				return 1;
+			}
+			pstart = next->next;
+			next = next->next;
+			while (!eof_token(next) && depth > 0) {
+				if (match_op(next, '('))
+					depth++;
+				else if (match_op(next, ')') && !--depth)
+					break;
+				pend = next;
+				next = next->next;
+			}
+			if (!match_op(next, ')')) {
+				sparse_error(id_pos, "expected ')'");
+				return 1;
+			}
+			next = next->next;
+			if (kind == EMBED_PARAM_LIMIT) {
+				if (!eval_embed_limit_expr(id_pos, pstart, pend,
+							   &limit_val))
+					return 1;
+				has_limit = 1;
+			} else if (kind == EMBED_PARAM_PREFIX) {
+				prefix_start = pstart;
+				prefix_end = pend;
+			} else if (kind == EMBED_PARAM_SUFFIX) {
+				suffix_start = pstart;
+				suffix_end = pend;
+			} else if (kind == EMBED_PARAM_IF_EMPTY) {
+				if_empty_start = pstart;
+				if_empty_end = pend;
+			}
+			param_p = &next;
+			continue;
+		}
+		sparse_error(next->pos, "unexpected token in #embed");
+		return 1;
+	}
+
+	fd = open_embed_file(stream, filename, expect);
+	if (fd < 0) {
+		sparse_error(token->pos, "unable to open '%s'", filename);
+		return 1;
+	}
+
+	if (fstat(fd, &st) < 0) {
+		close(fd);
+		sparse_error(token->pos, "unable to stat '%s'", filename);
+		return 1;
+	}
+	if (S_ISDIR(st.st_mode)) {
+		close(fd);
+		sparse_error(token->pos, "'%s' is a directory", filename);
+		return 1;
+	}
+
+	if (S_ISREG(st.st_mode) || has_limit) {
+		unsigned long long to_read =
+			S_ISREG(st.st_mode) ? (unsigned long long)st.st_size :
+					      limit_val;
+
+		if (has_limit && limit_val < to_read)
+			to_read = limit_val;
+		if (to_read > MAX_EMBED_SIZE) {
+			sparse_error(
+				token->pos,
+				"'%s' is too large to embed (%llu bytes, max %d bytes)",
+				filename, to_read, MAX_EMBED_SIZE);
+			close(fd);
+			return 1;
+		}
+		buf = malloc(to_read ? to_read : 1);
+		if (!buf) {
+			sparse_error(
+				token->pos,
+				"out of memory allocating #embed buffer for '%s'",
+				filename);
+			close(fd);
+			return 1;
+		}
+		if (to_read > 0) {
+			size_t total = 0;
+
+			while (total < to_read) {
+				ssize_t r =
+					read(fd, buf + total, to_read - total);
+				if (r < 0) {
+					if (errno == EINTR || errno == EAGAIN)
+						continue;
+					sparse_error(token->pos,
+						     "error reading '%s': %s",
+						     filename, strerror(errno));
+					free(buf);
+					close(fd);
+					return 1;
+				}
+				if (r == 0)
+					break;
+				total += r;
+			}
+			bytes_read = total;
+		}
+	} else {
+		size_t cap = 4096;
+		size_t total = 0;
+
+		buf = malloc(cap);
+		if (!buf) {
+			sparse_error(
+				token->pos,
+				"out of memory allocating #embed buffer for '%s'",
+				filename);
+			close(fd);
+			return 1;
+		}
+		for (;;) {
+			ssize_t r;
+
+			if (total == cap) {
+				size_t new_cap = cap * 2;
+				unsigned char *nbuf;
+
+				if (new_cap > MAX_EMBED_SIZE + 1)
+					new_cap = MAX_EMBED_SIZE + 1;
+				nbuf = realloc(buf, new_cap);
+				if (!nbuf) {
+					sparse_error(
+						token->pos,
+						"out of memory allocating #embed buffer for '%s'",
+						filename);
+					free(buf);
+					close(fd);
+					return 1;
+				}
+				buf = nbuf;
+				cap = new_cap;
+			}
+			r = read(fd, buf + total, cap - total);
+			if (r < 0) {
+				if (errno == EINTR || errno == EAGAIN)
+					continue;
+				sparse_error(token->pos,
+					     "error reading '%s': %s",
+					     filename, strerror(errno));
+				free(buf);
+				close(fd);
+				return 1;
+			}
+			if (r == 0)
+				break;
+			total += r;
+			if (total > MAX_EMBED_SIZE) {
+				sparse_error(
+					token->pos,
+					"'%s' is too large to embed (max %d bytes)",
+					filename, MAX_EMBED_SIZE);
+				free(buf);
+				close(fd);
+				return 1;
+			}
+		}
+		bytes_read = total;
+	}
+	close(fd);
+
+	if (bytes_read == 0) {
+		if (if_empty_start && if_empty_end) {
+			struct token *p = if_empty_start;
+			while (p) {
+				struct token *t = dup_token(p, &token->pos);
+				*tail = t;
+				tail = &t->next;
+				if (p == if_empty_end)
+					break;
+				p = p->next;
+			}
+			*tail = *line;
+			*line = head;
+		}
+		free(buf);
+		free_preprocessor_line(token);
+		return 0;
+	}
+
+	if (prefix_start && prefix_end) {
+		struct token *p = prefix_start;
+		while (p) {
+			struct token *t = dup_token(p, &token->pos);
+			*tail = t;
+			tail = &t->next;
+			if (p == prefix_end)
+				break;
+			p = p->next;
+		}
+	}
+
+	if (!num_strs_inited) {
+		for (unsigned int i = 0; i < 256; i++)
+			snprintf(num_strs[i], sizeof(num_strs[i]), "%u",
+				 i & 0xff);
+		num_strs_inited = 1;
+	}
+
+	for (ssize_t i = 0; i < bytes_read; i++) {
+		if (i > 0) {
+			struct token *comma = alloc_token(&token->pos);
+			token_type(comma) = TOKEN_SPECIAL;
+			comma->special = ',';
+			*tail = comma;
+			tail = &comma->next;
+		}
+		struct token *num = alloc_token(&token->pos);
+		token_type(num) = TOKEN_NUMBER;
+		num->number = num_strs[buf[i]];
+		*tail = num;
+		tail = &num->next;
+	}
+
+	if (suffix_start && suffix_end) {
+		struct token *p = suffix_start;
+		while (p) {
+			struct token *t = dup_token(p, &token->pos);
+			*tail = t;
+			tail = &t->next;
+			if (p == suffix_end)
+				break;
+			p = p->next;
+		}
+	}
+
+	if (head) {
+		*tail = *line;
+		*line = head;
+	}
+	free(buf);
+	free_preprocessor_line(token);
+	return 0;
+}
+
 static int free_preprocessor_line(struct token *token)
 {
 	while (token_type(token) != TOKEN_EOF) {
@@ -2993,6 +3388,7 @@ static void init_preprocessor(void)
 		{ "error",		handle_error },
 		{ "include",		handle_include },
 		{ "include_next",	handle_include_next },
+		{ "embed",		handle_embed },
 		{ "pragma",		handle_pragma },
 		{ "line",		handle_line },
 		{ "ident",		handle_ident },
