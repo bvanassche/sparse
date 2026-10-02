@@ -31,4 +31,7 @@
 #define SELECT_COST 20		/* Cut-off for turning a conditional into a select */
 #define BRANCH_COST 10		/* Cost of a conditional branch */
 
+struct expression;
+void expand_constexpr_initializer(struct expression *expr);
+
 #endif

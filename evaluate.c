@@ -35,6 +35,7 @@
 #include <limits.h>
 
 #include "evaluate.h"
+#include "expand.h"
 #include "simplify.h"
 #include "lib.h"
 #include "allocate.h"
@@ -95,6 +96,8 @@ static struct symbol *evaluate_symbol_expression(struct expression *expr)
 	}
 
 	examine_symbol_type(sym);
+	if (sym->ctype.modifiers & MOD_CONSTEXPR)
+		evaluate_symbol(sym);
 
 	base_type = get_base_type(sym);
 	if (!base_type) {
@@ -111,6 +114,14 @@ static struct symbol *evaluate_symbol_expression(struct expression *expr)
 	expr->op = '*';
 	expr->unop = addr;
 	expr->flags = CEF_NONE;
+	if (sym->ctype.modifiers & MOD_CONSTEXPR) {
+		if (is_float_type(base_type))
+			expr->flags = CEF_SET_FLOAT;
+		else if (is_int_type(base_type))
+			expr->flags = CEF_SET_ICE;
+		else
+			expr->flags = CEF_ADDR;
+	}
 
 	/* The type of a symbol is the symbol itself! */
 	expr->ctype = sym;
@@ -2388,6 +2399,14 @@ static struct symbol *evaluate_member_dereference(struct expression *expr)
 	expr->type = EXPR_PREOP;
 	expr->op = '*';
 	expr->unop = add;
+	if (mod & MOD_CONSTEXPR) {
+		if (is_float_type(ctype))
+			expr->flags = CEF_SET_FLOAT;
+		else if (is_int_type(ctype))
+			expr->flags = CEF_SET_ICE;
+		else
+			expr->flags = CEF_ADDR;
+	}
 
 	expr->ctype = member;
 	return member;
@@ -2922,7 +2941,7 @@ found:
 		else
 			v = &top->ident_expression;
 
-		mods |= ctype->ctype.modifiers & MOD_STORAGE;
+		mods |= ctype->ctype.modifiers & (MOD_STORAGE | MOD_CONSTEXPR);
 		if (handle_initializer(v, 1, lclass, top->ctype, mods))
 			continue;
 
@@ -3015,6 +3034,161 @@ static struct expression *handle_scalar(struct expression *e, int nested)
  * { "string", ...} - we need to preserve that string literal recognizable
  * until we dig into the inner struct.
  */
+static void check_constexpr_scalar_init(struct expression *orig,
+					struct symbol *target)
+{
+	struct symbol *ttype, *stype;
+	int tclass = classify_type(target, &ttype);
+	int sclass = classify_type(orig->ctype, &stype);
+	struct expression tmp;
+
+	if (!valid_type(target) || !valid_type(orig->ctype))
+		return;
+
+	if ((tclass & TYPE_PTR) || is_nullptr_type(ttype)) {
+		if (!(orig->flags & (CEF_ACE | CEF_ADDR))) {
+			sparse_error(orig->pos,
+				     "non-constant initializer for constexpr object");
+			return;
+		}
+		tmp = *orig;
+		if (!is_null_pointer_constant(&tmp) &&
+		    !(((sclass & TYPE_PTR) || is_nullptr_type(stype)) && is_zero_constant(&tmp)))
+			sparse_error(orig->pos,
+				     "constexpr pointer initializer is not null");
+		return;
+	}
+
+	if (is_int(tclass)) {
+		int sw, tw;
+		bool s_unsigned, t_unsigned, s_neg;
+
+		if (!(orig->flags & (CEF_ACE | CEF_ADDR))) {
+			sparse_error(orig->pos,
+				     "non-constant initializer for constexpr object");
+			return;
+		}
+		if (!(orig->flags & CEF_ICE) || !is_int(sclass)) {
+			sparse_error(
+				orig->pos,
+				"constexpr integer initializer is not an integer constant expression");
+			return;
+		}
+		tmp = *orig;
+		expand_constexpr_initializer(&tmp);
+		if (tmp.type != EXPR_VALUE) {
+			sparse_error(orig->pos,
+				     "non-constant initializer for constexpr object");
+			return;
+		}
+		sw = stype->bit_size;
+		s_unsigned = (stype->ctype.modifiers & MOD_UNSIGNED) != 0;
+		s_neg = !s_unsigned && sw > 0 && sw <= 64 &&
+			(tmp.value & sign_bit(sw)) != 0;
+		if (is_bool_type(ttype)) {
+			if (s_neg || (tmp.value != 0 && tmp.value != 1))
+				sparse_error(
+					orig->pos,
+					"constexpr initializer not representable in target type");
+			return;
+		}
+		tw = ttype->bit_size;
+		t_unsigned = (ttype->ctype.modifiers & MOD_UNSIGNED) != 0;
+		if (s_neg) {
+			long long sval = sw > 64 ? (long long)tmp.value :
+						   bits_extend(tmp.value, sw, 1);
+			if (t_unsigned ||
+			    (tw < 64 && sval < -(1LL << (tw - 1))))
+				sparse_error(
+					orig->pos,
+					"constexpr initializer not representable in target type");
+		} else {
+			unsigned long long uval =
+				sw > 64 ? tmp.value :
+					  (unsigned long long)zero_extend(tmp.value, sw);
+			int max_bits = t_unsigned ? tw : (tw - 1);
+			if ((max_bits <= 0 && uval != 0) ||
+			    (max_bits > 0 && max_bits < 64 &&
+			     (uval >> max_bits) != 0))
+				sparse_error(
+					orig->pos,
+					"constexpr initializer not representable in target type");
+		}
+		return;
+	}
+
+	if (tclass & TYPE_FLOAT) {
+		if (!(orig->flags & CEF_ACE) || !(sclass & TYPE_NUM)) {
+			sparse_error(orig->pos,
+				     "non-constant initializer for constexpr object");
+			return;
+		}
+		tmp = *orig;
+		expand_constexpr_initializer(&tmp);
+		if (sclass & TYPE_FLOAT) {
+			long double fv;
+			if (tmp.type != EXPR_FVALUE) {
+				sparse_error(
+					orig->pos,
+					"non-constant initializer for constexpr object");
+				return;
+			}
+			fv = tmp.fvalue;
+			if (stype->rank > ttype->rank && fv == fv) {
+				bool ok = ttype->rank < 0 ?
+						  ((long double)(float)fv == fv) :
+						  (ttype->rank == 0 ?
+							   ((long double)(double)fv == fv) :
+							   true);
+				if (!ok)
+					sparse_error(
+						orig->pos,
+						"constexpr initializer not representable in target type");
+			}
+		} else if (is_int(sclass)) {
+			int sw = stype->bit_size;
+			bool s_unsigned = (stype->ctype.modifiers & MOD_UNSIGNED) != 0;
+			bool s_neg = !s_unsigned && sw > 0 && sw <= 64 &&
+				     (tmp.value & sign_bit(sw)) != 0;
+			if (tmp.type != EXPR_VALUE) {
+				sparse_error(
+					orig->pos,
+					"non-constant initializer for constexpr object");
+				return;
+			}
+			if (s_neg) {
+				long long sval = sw > 64 ? (long long)tmp.value :
+							   bits_extend(tmp.value, sw, 1);
+				long double ld = ttype->rank < 0 ?
+							 (long double)(float)sval :
+							 (ttype->rank == 0 ?
+								  (long double)(double)sval :
+								  (long double)sval);
+				if (sval != LLONG_MIN &&
+				    (ld <= (long double)LLONG_MIN ||
+				     (long long)ld != sval))
+					sparse_error(
+						orig->pos,
+						"constexpr initializer not representable in target type");
+			} else {
+				unsigned long long uval =
+					sw > 64 ? tmp.value :
+						  (unsigned long long)zero_extend(tmp.value, sw);
+				long double ld = ttype->rank < 0 ?
+							 (long double)(float)uval :
+							 (ttype->rank == 0 ?
+								  (long double)(double)uval :
+								  (long double)uval);
+				if (ld >= 18446744073709551616.0L ||
+				    (unsigned long long)ld != uval)
+					sparse_error(
+						orig->pos,
+						"constexpr initializer not representable in target type");
+			}
+		}
+	}
+}
+
 static int handle_initializer(struct expression **ep, int nested,
 		int class, struct symbol *ctype, unsigned long mods)
 {
@@ -3026,20 +3200,27 @@ static int handle_initializer(struct expression **ep, int nested,
 
 	/* scalar */
 	if (!(class & TYPE_COMPOUND)) {
+		struct expression orig;
+
 		e = handle_scalar(e, nested);
+
 		if (!e)
 			return 0;
 		*ep = e;
 		if (!evaluate_expression(e))
 			return 1;
+		degenerate(e);
+		orig = *e;
 		compatible_assignment_types(e, ctype, ep, "initializer");
 		/*
 		 * Initializers for static storage duration objects
 		 * shall be constant expressions or a string literal [6.7.8(4)].
 		 */
 		mods |= ctype->ctype.modifiers;
-		mods &= (MOD_TOPLEVEL | MOD_STATIC);
-		if (mods && !(e->flags & (CEF_ACE | CEF_ADDR)))
+		if (mods & MOD_CONSTEXPR)
+			check_constexpr_scalar_init(&orig, ctype);
+		if ((mods & (MOD_TOPLEVEL | MOD_STATIC)) &&
+		    !(e->flags & (CEF_ACE | CEF_ADDR)))
 			if (Wconstexpr_not_const)
 				warning(e->pos, "non-constant initializer for static object");
 
@@ -3084,12 +3265,18 @@ static int handle_initializer(struct expression **ep, int nested,
 	type = evaluate_expression(e);
 	if (!type)
 		return 0;
+	mods |= ctype->ctype.modifiers;
 	if (ctype->type == SYM_NODE)
 		ctype = ctype->ctype.base_type;
 	if (type->type == SYM_NODE)
 		type = type->ctype.base_type;
-	if (ctype == type)
+	if (ctype == type) {
+		if ((mods & MOD_CONSTEXPR) && !(e->flags & (CEF_ACE | CEF_ADDR)))
+			sparse_error(
+				e->pos,
+				"non-constant initializer for constexpr object");
 		return 1;
+	}
 	return 0;
 
 String:
@@ -3843,6 +4030,55 @@ void check_duplicates(struct symbol *sym)
 	}
 }
 
+static bool check_constexpr_vm_type(struct symbol *type)
+{
+	while (type) {
+		examine_symbol_type(type);
+		switch (type->type) {
+		case SYM_NODE:
+		case SYM_PTR:
+			type = type->ctype.base_type;
+			continue;
+		case SYM_ARRAY:
+			if (type->array_size &&
+			    type->array_size->type != EXPR_VALUE)
+				return true;
+			type = type->ctype.base_type;
+			continue;
+		default:
+			return false;
+		}
+	}
+	return false;
+}
+
+static bool has_invalid_constexpr_qualifiers(struct symbol *type)
+{
+	while (type) {
+		if (type->ctype.modifiers &
+		    (MOD_VOLATILE | MOD_ATOMIC | MOD_RESTRICT))
+			return true;
+		switch (type->type) {
+		case SYM_NODE:
+		case SYM_ARRAY:
+			type = type->ctype.base_type;
+			continue;
+		case SYM_STRUCT:
+		case SYM_UNION: {
+			struct symbol *m;
+			FOR_EACH_PTR(type->symbol_list, m) {
+				if (has_invalid_constexpr_qualifiers(m))
+					return true;
+			} END_FOR_EACH_PTR(m);
+			return false;
+		}
+		default:
+			return false;
+		}
+	}
+	return false;
+}
+
 static struct symbol *evaluate_symbol(struct symbol *sym)
 {
 	struct symbol *base_type;
@@ -3858,9 +4094,24 @@ static struct symbol *evaluate_symbol(struct symbol *sym)
 	if (!base_type)
 		return NULL;
 
+	if ((sym->ctype.modifiers & MOD_CONSTEXPR) &&
+	    base_type->type != SYM_FN && !(sym->ctype.modifiers & MOD_USERTYPE)) {
+		if (check_constexpr_vm_type(sym))
+			sparse_error(
+				sym->pos,
+				"constexpr variable '%s' cannot have variably modified type",
+				show_ident(sym->ident));
+		if (has_invalid_constexpr_qualifiers(sym))
+			sparse_error(
+				sym->pos,
+				"constexpr variable '%s' cannot have volatile, atomic, or restrict type",
+				show_ident(sym->ident));
+	}
+
 	/* Evaluate the initializers */
 	if (sym->initializer) {
-		bool mark_underspec = sym->c23_auto;
+		bool mark_underspec = sym->c23_auto ||
+				      (sym->ctype.modifiers & MOD_CONSTEXPR);
 		if (mark_underspec)
 			sym->underspecified = 1;
 		evaluate_initializer(sym, &sym->initializer);

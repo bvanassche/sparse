@@ -710,6 +710,41 @@ redo:
 	return &value;
 }
 
+static struct expression *lookup_initializer_offset(struct expression *value, unsigned int offset, bool recurse)
+{
+	struct expression *entry;
+
+	FOR_EACH_PTR(value->expr_list, entry) {
+		if (entry->type == EXPR_INITIALIZER && recurse) {
+			struct expression *sub = lookup_initializer_offset(entry, offset, recurse);
+			if (sub)
+				return sub;
+			continue;
+		}
+		if (entry->type != EXPR_POS) {
+			if (offset)
+				continue;
+			return entry;
+		}
+		if (entry->init_nr > 1 && entry->ctype) {
+			int elem_bytes = bits_to_bytes(entry->ctype->bit_size);
+			if (elem_bytes > 0) {
+				unsigned long long end = (unsigned long long)entry->init_offset +
+							 (unsigned long long)entry->init_nr * elem_bytes;
+				if (offset >= entry->init_offset && offset < end &&
+				    ((offset - entry->init_offset) % elem_bytes) == 0)
+					return entry->init_expr;
+			}
+		}
+		if (entry->init_offset < offset)
+			continue;
+		if (entry->init_offset > offset)
+			break;
+		return entry->init_expr;
+	} END_FOR_EACH_PTR(entry);
+	return NULL;
+}
+
 /*
  * Look up a trustable initializer value at the requested offset.
  *
@@ -719,35 +754,36 @@ static struct expression *constant_symbol_value(struct symbol *sym, int offset)
 {
 	struct expression *value;
 
-	if (offset < 0)
+	if (offset < 0 || sym->expanding)
 		return NULL;
 	if (sym->ctype.modifiers & MOD_VOLATILE)
 		return NULL;
-	if (sym->ctype.modifiers & MOD_ACCESS)
+	if ((sym->ctype.modifiers & MOD_ACCESS) &&
+	    !(sym->ctype.modifiers & MOD_CONSTEXPR))
 		return NULL;
 	if ((sym->ctype.modifiers & (MOD_TOPLEVEL | MOD_STATIC)) &&
-	    !(sym->ctype.modifiers & MOD_CONST) &&
+	    !(sym->ctype.modifiers & (MOD_CONST | MOD_CONSTEXPR)) &&
 	    !sym->string && sym->ident)
 		return NULL;
 	value = sym->initializer;
 	if (!value)
 		return NULL;
+	sym->expanding = 1;
+	expand_expression(value);
+	sym->expanding = 0;
+	if (value->type == EXPR_PREOP && value->op == '*' &&
+	    value->unop && value->unop->type == EXPR_SYMBOL &&
+	    (value->unop->symbol->ctype.modifiers & MOD_CONSTEXPR)) {
+		sym->expanding = 1;
+		value = constant_symbol_value(value->unop->symbol, offset);
+		sym->expanding = 0;
+		return value;
+	}
 	if (value->type == EXPR_INITIALIZER) {
-		struct expression *entry;
-		FOR_EACH_PTR(value->expr_list, entry) {
-			if (entry->type != EXPR_POS) {
-				if (offset)
-					continue;
-				return entry;
-			}
-			if (entry->init_offset < offset)
-				continue;
-			if (entry->init_offset > offset)
-				break;
-			return entry->init_expr;
-		} END_FOR_EACH_PTR(entry);
-
-		value = default_initializer(sym, offset);
+		bool recurse = (sym->ctype.modifiers & (MOD_CONST | MOD_CONSTEXPR)) != 0;
+		value = lookup_initializer_offset(value, offset, recurse);
+		if (!value)
+			value = default_initializer(sym, offset);
 	}
 	return value;
 }
@@ -801,12 +837,17 @@ static int expand_dereference(struct expression *expr)
 				expr->type = EXPR_VALUE;
 				expr->value = value->value;
 				expr->taint = 0;
+				if ((sym->ctype.modifiers & MOD_CONSTEXPR) &&
+				    is_int_type(ctype))
+					expr->flags = CEF_SET_ICE;
 				return 0;
 			} else if (value->type == EXPR_FVALUE) {
 				if (!is_float_type(ctype))
 					return UNSAFE;
 				expr->type = EXPR_FVALUE;
 				expr->fvalue = value->fvalue;
+				if (sym->ctype.modifiers & MOD_CONSTEXPR)
+					expr->flags = CEF_SET_FLOAT;
 				return 0;
 			}
 		}
@@ -1085,6 +1126,11 @@ static unsigned long bit_offset(const struct expression *expr)
 	while (expr->type == EXPR_POS) {
 		offset += bytes_to_bits(expr->init_offset);
 		expr = expr->init_expr;
+	}
+	if (expr && expr->type == EXPR_INITIALIZER) {
+		struct expression *first = first_ptr_list((struct ptr_list *)expr->expr_list);
+		if (first)
+			return offset + bit_offset(first);
 	}
 	if (expr && expr->ctype)
 		offset += expr->ctype->bit_offset;
@@ -1536,4 +1582,12 @@ int is_zero_constant(struct expression *expr)
 	expand_expression(expr);
 	conservative = saved;
 	return expr->type == EXPR_VALUE && !expr->value;
+}
+
+void expand_constexpr_initializer(struct expression *expr)
+{
+	const int saved = conservative;
+	conservative = 1;
+	expand_expression(expr);
+	conservative = saved;
 }

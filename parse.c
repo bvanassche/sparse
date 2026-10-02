@@ -57,7 +57,7 @@ static declarator_t
 	attribute_specifier, typeof_specifier, typeof_unqual_specifier,
 	storage_specifier, thread_specifier;
 static declarator_t generic_qualifier;
-static declarator_t autotype_specifier, auto_specifier;
+static declarator_t autotype_specifier, auto_specifier, constexpr_specifier;
 
 static struct token *parse_if_statement(struct token *token, struct statement *stmt);
 static struct token *parse_return_statement(struct token *token, struct statement *stmt);
@@ -144,6 +144,11 @@ static struct symbol_op alignas_op = {
 static struct symbol_op auto_op = {
 	.type = KW_MODIFIER,
 	.declarator = auto_specifier,
+};
+
+static struct symbol_op constexpr_op = {
+	.type = KW_MODIFIER,
+	.declarator = constexpr_specifier,
 };
 
 static struct symbol_op register_op = {
@@ -479,6 +484,7 @@ static struct init_keyword {
 	N("__thread",		&thread_op),
 	N("_Thread_local",	&thread_op),
 	N("thread_local",	&thread_op,	.std = STANDARD_C23),
+	N("constexpr",		&constexpr_op,	.std = STANDARD_C23),
 
 	A("inline",		&inline_op,	.mods = MOD_INLINE),
 
@@ -1209,6 +1215,37 @@ static struct token *auto_specifier(struct token *token, struct symbol *sym,
 		sparse_error(token->pos, "duplicate auto");
 	ctx->has_auto = 1;
 	return token;
+}
+
+static struct token *constexpr_specifier(struct token *token,
+					 struct symbol *sym,
+					 struct decl_state *ctx)
+{
+	if (ctx->is_constexpr)
+		sparse_error(token->pos, "duplicate constexpr");
+	ctx->is_constexpr = 1;
+	ctx->ctype.modifiers |= MOD_CONSTEXPR;
+	return token;
+}
+
+static void apply_constexpr_const(struct symbol *sym)
+{
+	struct ctype *ctype;
+
+	if (!sym)
+		return;
+	sym->ctype.modifiers |= MOD_CONST;
+	ctype = &sym->ctype;
+	while (ctype->base_type) {
+		struct symbol *base = ctype->base_type;
+		if (base->type != SYM_NODE && base->type != SYM_ARRAY)
+			break;
+		struct symbol *copy = alloc_symbol(base->pos, base->type);
+		*copy = *base;
+		copy->ctype.modifiers |= MOD_CONST;
+		ctype->base_type = copy;
+		ctype = &copy->ctype;
+	}
 }
 
 static struct token *ignore_attribute(struct token *token, struct symbol *attr, struct decl_state *ctx)
@@ -2119,6 +2156,11 @@ static struct token *declaration_list(struct token *token, struct symbol_list **
 			if (ctx.autotype)
 				decl->ctype.base_type = &bad_ctype;
 		}
+		if (ctx.is_constexpr)
+			sparse_error(
+				decl->pos,
+				"struct or union member '%s' cannot be declared constexpr",
+				show_ident(decl->ident));
 		if (decl->ctype.modifiers & MOD_TLS)
 			sparse_error(
 				decl->pos,
@@ -2166,10 +2208,6 @@ static struct token *parameter_declaration(struct token *token, struct symbol *s
 	sym->ctype.modifiers |= decl_modifiers(&ctx);
 	sym->endpos = token->pos;
 	sym->forced_arg = ctx.forced;
-	if (ctx.has_alignas)
-		sparse_error(sym->pos,
-			     "alignment specified for parameter '%s'",
-			     show_ident(sym->ident));
 	if (ctx.has_auto || ctx.autotype) {
 		sparse_error(sym->pos,
 			     "parameter '%s' cannot be declared %s",
@@ -2178,6 +2216,14 @@ static struct token *parameter_declaration(struct token *token, struct symbol *s
 		if (ctx.autotype)
 			sym->ctype.base_type = &bad_ctype;
 	}
+	if (ctx.is_constexpr)
+		sparse_error(sym->pos,
+			     "parameter '%s' cannot be declared constexpr",
+			     show_ident(sym->ident));
+	if (ctx.has_alignas)
+		sparse_error(sym->pos,
+			     "alignment specified for parameter '%s'",
+			     show_ident(sym->ident));
 	if (sym->ctype.modifiers & MOD_TLS)
 		sparse_error(sym->pos,
 			     "parameter '%s' cannot be thread-local",
@@ -2203,6 +2249,8 @@ struct token *typename(struct token *token, struct symbol **p, int *forced)
 	apply_modifiers(token->pos, &ctx);
 	sym->ctype = ctx.ctype;
 	sym->endpos = token->pos;
+	if (ctx.is_constexpr)
+		sparse_error(sym->pos, "constexpr in typename");
 	class = ctx.storage_class;
 	if (forced)
 		*forced = ctx.forced;
@@ -3264,6 +3312,9 @@ struct token *external_declaration(struct token *token, struct symbol_list **lis
 		if (ctx.autotype)
 			sparse_error(token->pos, "%s in empty declaration",
 				     ctx.has_auto ? "auto" : "__auto_type");
+		if (ctx.is_constexpr)
+			sparse_error(token->pos,
+				     "constexpr in empty declaration");
 		apply_modifiers(token->pos, &ctx);
 		return token->next;
 	}
@@ -3294,6 +3345,10 @@ struct token *external_declaration(struct token *token, struct symbol_list **lis
 		decl->ctype.modifiers |= MOD_USERTYPE;
 
 	base_type = decl->ctype.base_type;
+	if (ctx.is_constexpr && !is_typedef &&
+	    (!base_type || base_type->type != SYM_FN))
+		apply_constexpr_const(decl);
+
 	if (!is_typedef && ctx.autotype && !ctx.has_auto &&
 	    base_type == &autotype_ctype) {
 		struct symbol *prev = lookup_symbol(ident, NS_SYMBOL | NS_TYPEDEF);
@@ -3317,6 +3372,12 @@ struct token *external_declaration(struct token *token, struct symbol_list **lis
 			}
 		}
 	} else if (base_type && base_type->type == SYM_FN) {
+		if (ctx.is_constexpr) {
+			sparse_error(
+				decl->pos,
+				"function '%s' cannot be declared constexpr",
+				show_ident(decl->ident));
+		}
 		if (base_type->ctype.base_type == &autotype_ctype) {
 			sparse_error(decl->pos, "'%s()' has %s return type",
 				     show_ident(decl->ident),
@@ -3360,7 +3421,7 @@ struct token *external_declaration(struct token *token, struct symbol_list **lis
 	for (;;) {
 		if (!is_typedef && match_op(token, '=')) {
 			struct token *next = token->next;
-			bool mark_underspec = decl->c23_auto;
+			bool mark_underspec = decl->c23_auto || ctx.is_constexpr;
 			if (mark_underspec)
 				decl->underspecified = 1;
 			token = initializer(&decl->initializer, next);
@@ -3403,7 +3464,7 @@ struct token *external_declaration(struct token *token, struct symbol_list **lis
 			}
 		}
 
-		if (!is_typedef && decl->c23_auto &&
+		if (!is_typedef && (decl->c23_auto || ctx.is_constexpr) &&
 		    (!decl->ctype.base_type ||
 		     decl->ctype.base_type->type != SYM_FN)) {
 			struct symbol *prev;
@@ -3450,6 +3511,34 @@ struct token *external_declaration(struct token *token, struct symbol_list **lis
 					     msg);
 				decl->ctype.base_type = &bad_ctype;
 			}
+		}
+
+		if (ctx.is_constexpr) {
+			if (is_typedef)
+				sparse_error(
+					decl->pos,
+					"constexpr cannot be used with typedef");
+			else if (ctx.storage_class & MOD_EXTERN)
+				sparse_error(
+					decl->pos,
+					"constexpr cannot be used with extern");
+			else if ((ctx.storage_class & MOD_REGISTER) &&
+				 toplevel(block_scope))
+				sparse_error(
+					decl->pos,
+					"constexpr register variable '%s' at file scope",
+					show_ident(decl->ident));
+			else if (decl->ctype.modifiers & MOD_TLS)
+				sparse_error(
+					decl->pos,
+					"constexpr cannot be used with thread_local");
+			else if (!decl->initializer &&
+				 (!decl->ctype.base_type ||
+				  decl->ctype.base_type->type != SYM_FN))
+				sparse_error(
+					decl->pos,
+					"constexpr variable '%s' without initializer",
+					show_ident(decl->ident));
 		}
 
 		if (ctx.has_alignas) {
@@ -3506,6 +3595,11 @@ struct token *external_declaration(struct token *token, struct symbol_list **lis
 
 		if (is_typedef)
 			decl->ctype.modifiers |= MOD_USERTYPE;
+
+		base_type = decl->ctype.base_type;
+		if (ctx.is_constexpr && !is_typedef &&
+		    (!base_type || base_type->type != SYM_FN))
+			apply_constexpr_const(decl);
 
 		bind_symbol(decl, ident, is_typedef ? NS_TYPEDEF: NS_SYMBOL);
 

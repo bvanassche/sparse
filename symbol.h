@@ -117,6 +117,7 @@ struct decl_state {
 	unsigned char packed;
 	unsigned char has_auto;
 	unsigned char has_alignas;
+	unsigned char is_constexpr;
 	unsigned char designated_init;
 	unsigned char transparent_union;
 };
@@ -254,10 +255,10 @@ struct symbol {
 
 #define MOD_GNU_INLINE		0x00010000
 #define MOD_USERTYPE		0x00020000
-     // MOD UNUSED		0x00040000
-     // MOD UNUSED		0x00080000
-     // MOD UNUSED		0x00100000
-     // MOD UNUSED		0x00200000
+#define MOD_CONSTEXPR 0x00040000
+// MOD UNUSED		0x00080000
+// MOD UNUSED		0x00100000
+// MOD UNUSED		0x00200000
 
 #define MOD_UNUSED		0x00400000
 #define MOD_SAFE		0x00800000	// non-null/non-trapping pointer
@@ -275,7 +276,7 @@ struct symbol {
 #define MOD_ESIGNED	(MOD_SIGNED | MOD_EXPLICITLY_SIGNED)
 #define MOD_SIGNEDNESS	(MOD_SIGNED | MOD_UNSIGNED | MOD_EXPLICITLY_SIGNED)
 #define MOD_SPECIFIER	MOD_SIGNEDNESS
-#define MOD_IGNORE	(MOD_STORAGE | MOD_ACCESS | MOD_USERTYPE | MOD_EXPLICITLY_SIGNED | MOD_EXT_VISIBLE | MOD_UNUSED | MOD_GNU_INLINE)
+#define MOD_IGNORE	(MOD_STORAGE | MOD_ACCESS | MOD_USERTYPE | MOD_EXPLICITLY_SIGNED | MOD_EXT_VISIBLE | MOD_UNUSED | MOD_GNU_INLINE | MOD_CONSTEXPR)
 #define MOD_QUALIFIER	(MOD_CONST | MOD_VOLATILE | MOD_RESTRICT)
 #define MOD_PTRINHERIT	(MOD_QUALIFIER | MOD_ATOMIC | MOD_NODEREF | MOD_NORETURN | MOD_NOCAST)
 /* modifiers preserved by typeof() operator */
@@ -287,9 +288,9 @@ struct symbol {
 /* do not warn when these are duplicated */
 #define MOD_DUP_OK	(MOD_UNUSED|MOD_GNU_INLINE)
 /* must be part of the declared symbol, not its type */
-#define MOD_DECLARE	(MOD_STORAGE|MOD_INLINE|MOD_TLS|MOD_GNU_INLINE|MOD_UNUSED|MOD_PURE|MOD_NORETURN|MOD_EXT_VISIBLE)
-
-
+#define MOD_DECLARE                                                         \
+	(MOD_STORAGE | MOD_INLINE | MOD_TLS | MOD_GNU_INLINE | MOD_UNUSED | \
+	 MOD_PURE | MOD_NORETURN | MOD_EXT_VISIBLE | MOD_CONSTEXPR)
 
 /* Current parsing/evaluation function */
 extern struct symbol *current_fn;

@@ -563,7 +563,7 @@ static struct symbol * examine_node_type(struct symbol *sym)
 		sym->ctype.alignment = alignment;
 
 	/* Unsized array? The size might come from the initializer.. */
-	if (bit_size < 0 && base_type->type == SYM_ARRAY) {
+	if (bit_size < 0 && base_type->type == SYM_ARRAY && !base_type->array_size) {
 		struct expression *initializer = get_symbol_initializer(sym);
 		if (initializer) {
 			struct symbol *node_type = base_type->ctype.base_type;
@@ -871,6 +871,10 @@ void bind_symbol_with_scope(struct symbol *sym, struct ident *ident, enum namesp
 
 	if (ns == NS_SYMBOL && toplevel(scope)) {
 		unsigned mod = MOD_ADDRESSABLE | MOD_TOPLEVEL;
+
+		if ((sym->ctype.modifiers & MOD_CONSTEXPR) &&
+		    !(sym->ctype.modifiers & MOD_EXTERN))
+			sym->ctype.modifiers |= MOD_STATIC;
 
 		inherit_static(sym);
 
