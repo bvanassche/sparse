@@ -1926,8 +1926,9 @@ static enum kind which_func(struct token *token,
 	}
 
 	if (next->special == SPECIAL_ELLIPSIS) {
-		warning(next->pos,
-			"variadic functions must have one named argument");
+		if (standard < STANDARD_C23)
+			warning(next->pos,
+				"variadic functions must have one named argument");
 		return Proto;
 	}
 

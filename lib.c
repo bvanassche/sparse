@@ -299,7 +299,6 @@ static void create_builtin_stream(void)
 	add_pre_buffer("#add_system \"%s/include-fixed\"\n", gcc_base_dir);
 
 	add_pre_buffer("#define __builtin_stdarg_start(a,b) ((a) = (__builtin_va_list)(&(b)))\n");
-	add_pre_buffer("#define __builtin_va_start(a,b) ((a) = (__builtin_va_list)(&(b)))\n");
 	add_pre_buffer("#define __builtin_ms_va_start(a,b) ((a) = (__builtin_ms_va_list)(&(b)))\n");
 	add_pre_buffer("#define __builtin_va_arg(arg,type)  ({ type __va_arg_ret = *(type *)(arg); arg += sizeof(type); __va_arg_ret; })\n");
 	add_pre_buffer("#define __builtin_va_alist (*(void *)0)\n");
