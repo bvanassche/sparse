@@ -123,6 +123,9 @@ void predefined_macros(void)
 		predefine("__STDC_NO_COMPLEX__", 1, "1");
 		predefine("__STDC_NO_THREADS__", 1, "1");
 	}
+	predefine("__STDC_EMBED_NOT_FOUND__", 1, "0");
+	predefine("__STDC_EMBED_FOUND__", 1, "1");
+	predefine("__STDC_EMBED_EMPTY__", 1, "2");
 
 	predefine("__CHAR_BIT__", 1, "%d", bits_in_char);
 	if (funsigned_char)

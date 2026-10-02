@@ -764,6 +764,7 @@ static struct token **substitute(struct token **list, const struct token *body, 
 }
 
 static bool parse_has_include(struct token **list, int how);
+static bool parse_has_embed(struct token **list);
 
 static void reject_outside_directive(struct token *token)
 {
@@ -805,7 +806,8 @@ static int expand(struct token **list, struct symbol *sym)
 	}
 
 	if (expanding == &__has_include_ident ||
-	    expanding == &__has_include_next_ident) {
+	    expanding == &__has_include_next_ident ||
+	    expanding == &__has_embed_ident) {
 		bool ok;
 
 		if (!in_cond_expr) {
@@ -814,8 +816,10 @@ static int expand(struct token **list, struct symbol *sym)
 		}
 		if (expanding == &__has_include_ident)
 			ok = parse_has_include(list, 0);
-		else
+		else if (expanding == &__has_include_next_ident)
 			ok = parse_has_include(list, 1);
+		else
+			ok = parse_has_embed(list);
 		if (!ok)
 			replace_with_bool(token, 0);
 		return 0;
@@ -1099,7 +1103,7 @@ static bool collect_angle_filename(struct token **next_p, char *buf,
 	struct token *t = *next_p;
 	char *ptr = buf;
 
-	while (!eof_token(t) && !match_op(t, '>')) {
+	while (!eof_token(t = scan_next(&t)) && !match_op(t, '>')) {
 		const char *s = (token_type(t) == TOKEN_STRING) ?
 					t->string->data :
 					show_token(t);
@@ -1123,7 +1127,7 @@ static bool collect_angle_filename(struct token **next_p, char *buf,
 		sparse_error(pos, "empty filename");
 		return false;
 	}
-	*next_p = t->next;
+	*next_p = scan_next(&t->next);
 	return true;
 }
 
@@ -1224,6 +1228,432 @@ static bool parse_has_include(struct token **list, int how)
 	val = check_has_include(stream, filename, expect, how);
 	replace_with_bool(token, val);
 	token->next = next;
+	return true;
+
+err:
+	token->next = skip_balanced_parens(lparen);
+	return false;
+}
+
+static void replace_with_int(struct token *token, int val)
+{
+	static const char *const digits[] = { "0", "1", "2" };
+	token_type(token) = TOKEN_NUMBER;
+	token->number = (val >= 0 && val <= 2) ? digits[val] : "0";
+}
+
+#define MAX_EMBED_SIZE (16 * 1024 * 1024)
+
+enum embed_param_kind {
+	EMBED_PARAM_NONE = 0,
+	EMBED_PARAM_LIMIT = 1 << 0,
+	EMBED_PARAM_PREFIX = 1 << 1,
+	EMBED_PARAM_SUFFIX = 1 << 2,
+	EMBED_PARAM_IF_EMPTY = 1 << 3,
+};
+
+static enum embed_param_kind classify_embed_param(struct ident *id)
+{
+	if (id == &limit_ident || id == &__limit___ident)
+		return EMBED_PARAM_LIMIT;
+	if (id == &prefix_ident || id == &__prefix___ident)
+		return EMBED_PARAM_PREFIX;
+	if (id == &suffix_ident || id == &__suffix___ident)
+		return EMBED_PARAM_SUFFIX;
+	if (id == &if_empty_ident || id == &__if_empty___ident)
+		return EMBED_PARAM_IF_EMPTY;
+	return EMBED_PARAM_NONE;
+}
+
+static struct token *dup_token_range(struct token *start, struct token *end)
+{
+	struct token *head = &eof_token_entry;
+	struct token **tail = &head;
+	struct token *p;
+
+	if (!start || !end)
+		return &eof_token_entry;
+	for (p = start;; p = p->next) {
+		struct token *t = __alloc_token(0);
+		*t = *p;
+		*tail = t;
+		tail = &t->next;
+		if (p == end)
+			break;
+	}
+	*tail = &eof_token_entry;
+	return head;
+}
+
+static bool eval_embed_limit_expr(struct position pos, struct token *pstart,
+				  struct token *pend,
+				  unsigned long long *limit_val)
+{
+	struct token *copy = dup_token_range(pstart, pend);
+	struct expression *expr = NULL;
+	long long sval;
+
+	if (eof_token(copy)) {
+		sparse_error(pos, "expected expression in #embed limit");
+		return false;
+	}
+	in_cond_expr++;
+	expand_list(&copy);
+	for (struct token *t = copy; !eof_token(t); t = t->next) {
+		if (token_type(t) != TOKEN_IDENT)
+			continue;
+		if (standard >= STANDARD_C23 && t->ident == &true_ident) {
+			replace_with_bool(t, 1);
+		} else if (standard >= STANDARD_C23 &&
+			   t->ident == &false_ident) {
+			replace_with_bool(t, 0);
+		} else if (t->ident == &defined_ident) {
+			in_cond_expr--;
+			sparse_error(t->pos,
+				     "'defined' cannot appear in #embed limit");
+			return false;
+		} else {
+			token_type(t) = TOKEN_ZERO_IDENT;
+		}
+	}
+	in_cond_expr--;
+	copy = constant_expression(copy, &expr);
+	if (!expr || !eof_token(copy)) {
+		sparse_error(pos, "invalid #embed limit");
+		return false;
+	}
+	sval = get_expression_value(expr);
+	if (!expr->ctype || expr->type != EXPR_VALUE)
+		return false;
+	if (sval < 0 && !(expr->ctype->ctype.modifiers & MOD_UNSIGNED)) {
+		sparse_error(expr->pos, "negative #embed limit");
+		return false;
+	}
+	*limit_val = (unsigned long long)sval;
+	return true;
+}
+
+static int test_embed_file(const char *path, const char *filename,
+			   int has_limit, unsigned long long limit_val,
+			   unsigned long long *size)
+{
+	int fd;
+	struct stat st;
+	size_t plen = strlen(path);
+	size_t flen = strlen(filename);
+	char fullname[PATH_MAX];
+
+	if (plen + flen + 2 > sizeof(fullname))
+		return 0;
+	memcpy(fullname, path, plen);
+	if (plen && path[plen - 1] != '/') {
+		fullname[plen] = '/';
+		plen++;
+	}
+	memcpy(fullname + plen, filename, flen + 1);
+	fd = open(fullname, O_RDONLY | O_NONBLOCK);
+	if (fd < 0)
+		return 0;
+	if (fstat(fd, &st) < 0 || S_ISDIR(st.st_mode)) {
+		close(fd);
+		return 0;
+	}
+	if (S_ISREG(st.st_mode)) {
+		unsigned long long eff = st.st_size;
+
+		close(fd);
+		if (has_limit && limit_val < eff)
+			eff = limit_val;
+		if (eff > MAX_EMBED_SIZE)
+			return 0;
+		*size = eff;
+		return 1;
+	}
+	if (S_ISCHR(st.st_mode)) {
+		unsigned char b;
+		ssize_t r;
+
+		if (has_limit && limit_val == 0) {
+			close(fd);
+			*size = 0;
+			return 1;
+		}
+		if (has_limit && limit_val > MAX_EMBED_SIZE) {
+			close(fd);
+			return 0;
+		}
+		r = read(fd, &b, 1);
+		close(fd);
+		if (r == 0) {
+			*size = 0;
+			return 1;
+		}
+		if (r > 0 && has_limit) {
+			*size = 1;
+			return 1;
+		}
+		return 0;
+	}
+	close(fd);
+	return 0;
+}
+
+static int check_has_embed(struct stream *stream, const char *filename,
+			   int expect, int has_limit,
+			   unsigned long long limit_val,
+			   unsigned long long *size)
+{
+	const char **path;
+
+	/* Absolute path? */
+	if (filename[0] == '/')
+		return test_embed_file("", filename, has_limit, limit_val,
+				       size);
+
+	set_stream_include_path(stream);
+	path = expect ? angle_includepath : quote_includepath;
+	if (!path)
+		return 0;
+	while (*path != NULL) {
+		if (test_embed_file(*path++, filename, has_limit, limit_val,
+				    size))
+			return 1;
+	}
+	return 0;
+}
+
+static bool parse_has_embed(struct token **list)
+{
+	struct token *token = *list;
+	struct token *lparen = scan_next(&token->next);
+	struct token *next;
+	struct token *params, **param_p, *rparen, *after_rparen;
+	struct stream *stream = input_streams + token->pos.stream;
+	char filename[PATH_MAX];
+	int expect = 0;
+	int val = 0;
+	unsigned long long filesize = 0;
+	int has_limit = 0;
+	unsigned long long limit_val = ~0ULL;
+	unsigned int seen_params = 0;
+	int supported = 1;
+
+	if (!match_op(lparen, '(')) {
+		sparse_error(token->pos, "expected '(' after %s",
+			     show_token(token));
+		return false;
+	}
+	next = scan_next(&lparen->next);
+	if (match_op(next, '<')) {
+		expect = '>';
+		next = next->next;
+		if (!collect_angle_filename(&next, filename, sizeof(filename),
+					    token->pos))
+			goto err;
+	} else if (token_type(next) == TOKEN_STRING) {
+		if (!extract_string_filename(&next, filename, sizeof(filename)))
+			goto err;
+	} else {
+		struct token **p = &lparen->next;
+		int depth = 1;
+
+		rparen = scan_next(p);
+		while (!eof_token(rparen)) {
+			if (match_op(rparen, '('))
+				depth++;
+			else if (match_op(rparen, ')') && !--depth)
+				break;
+			p = &rparen->next;
+			rparen = scan_next(p);
+		}
+		if (!match_op(rparen, ')')) {
+			sparse_error(rparen->pos, "expected ')'");
+			token->next = rparen;
+			return false;
+		}
+		*p = &eof_token_entry;
+		expand_list(&lparen->next);
+		p = &lparen->next;
+		while (!eof_token(*p))
+			p = &(*p)->next;
+		*p = rparen;
+		next = lparen->next;
+		if (match_op(next, '<')) {
+			expect = '>';
+			next = next->next;
+			if (!collect_angle_filename(&next, filename,
+						    sizeof(filename),
+						    token->pos))
+				goto err;
+		} else if (token_type(next) == TOKEN_STRING) {
+			if (!extract_string_filename(&next, filename,
+						     sizeof(filename)))
+				goto err;
+		} else {
+			sparse_error(next->pos,
+				     "expected \"FILENAME\" or <FILENAME>");
+			goto err;
+		}
+	}
+
+	/* Isolate optional parameters before matching ')' */
+	params = next;
+	{
+		struct token **p = &params;
+		int depth = 1;
+
+		rparen = scan_next(p);
+		while (!eof_token(rparen)) {
+			if (match_op(rparen, '('))
+				depth++;
+			else if (match_op(rparen, ')') && !--depth)
+				break;
+			p = &rparen->next;
+			rparen = scan_next(p);
+		}
+		if (!match_op(rparen, ')')) {
+			sparse_error(rparen->pos, "expected ')'");
+			token->next = rparen;
+			return false;
+		}
+		after_rparen = rparen->next;
+		*p = &eof_token_entry;
+	}
+
+	param_p = &params;
+	while (!eof_token(next = scan_next(param_p))) {
+		if (token_type(next) == TOKEN_IDENT) {
+			struct ident *id;
+			struct position id_pos;
+			enum embed_param_kind kind;
+
+			if (!expand_one_symbol(param_p))
+				continue;
+			next = *param_p;
+			if (token_type(next) != TOKEN_IDENT) {
+				supported = 0;
+				param_p = &next->next;
+				continue;
+			}
+			id = next->ident;
+			id_pos = next->pos;
+			if (match_op(next->next, ':') &&
+			    match_op(next->next->next, ':')) {
+				struct token *attr = next->next->next->next;
+
+				if (token_type(attr) != TOKEN_IDENT) {
+					sparse_error(attr->pos,
+						     "identifier expected");
+					token->next = after_rparen;
+					return false;
+				}
+				supported = 0;
+				next = attr->next;
+				if (match_op(next, '(')) {
+					int depth = 1;
+
+					next = next->next;
+					while (!eof_token(next) && depth > 0) {
+						if (match_op(next, '('))
+							depth++;
+						else if (match_op(next, ')'))
+							depth--;
+						next = next->next;
+					}
+				}
+				param_p = &next;
+				continue;
+			}
+
+			kind = classify_embed_param(id);
+			if (kind != EMBED_PARAM_NONE) {
+				struct token *pstart, *pend = NULL;
+				int depth = 1;
+
+				if (seen_params & kind) {
+					sparse_error(
+						id_pos,
+						"duplicate embed parameter '%s'",
+						show_ident(id));
+					token->next = after_rparen;
+					return false;
+				}
+				seen_params |= kind;
+
+				next = scan_next(&next->next);
+				if (!match_op(next, '(')) {
+					sparse_error(
+						id_pos,
+						"expected '(' after '%s'",
+						show_ident(id));
+					token->next = after_rparen;
+					return false;
+				}
+				pstart = next->next;
+				next = next->next;
+				while (!eof_token(next) && depth > 0) {
+					if (match_op(next, '('))
+						depth++;
+					else if (match_op(next, ')') &&
+						 !--depth)
+						break;
+					pend = next;
+					next = next->next;
+				}
+				if (!match_op(next, ')')) {
+					sparse_error(id_pos, "expected ')'");
+					token->next = after_rparen;
+					return false;
+				}
+				next = next->next;
+				if (kind == EMBED_PARAM_LIMIT) {
+					if (!eval_embed_limit_expr(
+						    id_pos, pstart, pend,
+						    &limit_val)) {
+						token->next = after_rparen;
+						return false;
+					}
+					has_limit = 1;
+				}
+				param_p = &next;
+				continue;
+			}
+
+			/* Unknown non-prefixed parameter */
+			supported = 0;
+			next = scan_next(&next->next);
+			if (match_op(next, '(')) {
+				int depth = 1;
+
+				next = next->next;
+				while (!eof_token(next) && depth > 0) {
+					if (match_op(next, '('))
+						depth++;
+					else if (match_op(next, ')'))
+						depth--;
+					next = next->next;
+				}
+			}
+			param_p = &next;
+			continue;
+		}
+		supported = 0;
+		param_p = &next->next;
+	}
+
+	if (!supported) {
+		val = 0;
+	} else if (!check_has_embed(stream, filename, expect, has_limit,
+				    limit_val, &filesize)) {
+		val = 0;
+	} else if (filesize == 0 || (has_limit && limit_val == 0)) {
+		val = 2;
+	} else {
+		val = 1;
+	}
+
+	replace_with_int(token, val);
+	token->next = after_rparen;
 	return true;
 
 err:
@@ -1933,6 +2363,12 @@ static int expression_value(struct token **where)
 				replace_with_bool(p, 0);
 				break;
 			}
+			if (p->ident == &__has_embed_ident) {
+				if (parse_has_embed(list))
+					continue;
+				replace_with_bool(p, 0);
+				break;
+			}
 			if (!expand_one_symbol(list))
 				continue;
 			if (token_type(p) != TOKEN_IDENT)
@@ -2598,6 +3034,7 @@ static void init_preprocessor(void)
 		{ "__has_feature", NULL, expand_has_feature },
 		{ "__has_include", NULL, NULL },
 		{ "__has_include_next", NULL, NULL },
+		{ "__has_embed", NULL, NULL },
 	};
 
 	for (i = 0; i < ARRAY_SIZE(normal); i++) {
