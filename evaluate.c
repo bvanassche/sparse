@@ -2987,7 +2987,8 @@ static int is_string_literal(struct expression **v)
  * an effect of screwup).  In case of anything not legal, we are definitely
  * having an effect of screwup, so just fail and let the caller warn.
  */
-static struct expression *handle_scalar(struct expression *e, int nested)
+static struct expression *handle_scalar(struct expression *e, int nested,
+					int class, struct symbol *ctype)
 {
 	struct expression *v = NULL, *p;
 	int count = 0;
@@ -3001,6 +3002,19 @@ static struct expression *handle_scalar(struct expression *e, int nested)
 			v = p;
 		count++;
 	} END_FOR_EACH_PTR(p);
+	if (count == 0) {
+		if (standard >= STANDARD_C23) {
+			v = alloc_const_expression(e->pos, 0);
+			if (class & TYPE_PTR)
+				v->ctype = &null_ctype;
+			else if (is_nullptr_type(ctype)) {
+				v->ctype = &nullptr_ctype;
+				v->flags = CEF_ADDR;
+			}
+			return v;
+		}
+		return NULL;
+	}
 	if (count != 1)
 		return NULL;
 	switch(v->type) {
@@ -3202,7 +3216,7 @@ static int handle_initializer(struct expression **ep, int nested,
 	if (!(class & TYPE_COMPOUND)) {
 		struct expression orig;
 
-		e = handle_scalar(e, nested);
+		e = handle_scalar(e, nested, class, ctype);
 
 		if (!e)
 			return 0;
@@ -3302,6 +3316,11 @@ static void evaluate_initializer(struct symbol *ctype, struct expression **ep)
 {
 	struct symbol *type;
 	int class = classify_type(ctype, &type);
+	if ((type->type == SYM_STRUCT || type->type == SYM_UNION) &&
+	    (type->bit_size < 0 || !type->endpos.line)) {
+		expression_error(*ep, "initializer for incomplete type");
+		return;
+	}
 	if (!handle_initializer(ep, 0, class, ctype, 0))
 		expression_error(*ep, "invalid initializer");
 }

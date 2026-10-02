@@ -309,6 +309,8 @@ static const char *pseudo_name(pseudo_t pseudo, char *buf)
 	return buf;
 }
 
+static LLVMValueRef output_data(LLVMModuleRef module, struct symbol *sym);
+
 static LLVMValueRef get_sym_value(LLVMModuleRef module, struct symbol *sym)
 {
 	const char *name = show_ident(sym->ident);
@@ -1250,6 +1252,83 @@ static void output_fn(LLVMModuleRef module, struct entrypoint *ep)
 	LLVMDisposeBuilder(function.builder);
 }
 
+static LLVMValueRef expr_to_const_val(LLVMModuleRef module, struct symbol *sym,
+				      struct expression *initializer)
+{
+	LLVMTypeRef dtype = symbol_type(sym);
+
+	if (!initializer)
+		return LLVMConstNull(dtype);
+
+	switch (initializer->type) {
+	case EXPR_VALUE:
+		return constant_value(initializer->value, dtype);
+	case EXPR_FVALUE:
+		return LLVMConstReal(dtype, initializer->fvalue);
+	case EXPR_SYMBOL: {
+		struct symbol *isym = initializer->symbol;
+
+		if (!isym->ident) {
+			if (!isym->aux) {
+				expand_symbol(isym);
+				isym->aux = output_data(module, isym);
+			}
+			return isym->aux;
+		}
+		LLVMValueRef gv = LLVMGetNamedGlobal(module, show_ident(isym->ident));
+		if (!gv)
+			gv = output_data(module, isym);
+		return gv;
+	}
+	case EXPR_STRING: {
+		const char *s = initializer->string->data;
+		size_t len = initializer->string->length;
+
+		return const_string(s, len);
+	}
+	case EXPR_INITIALIZER: {
+		if (ptr_list_empty((struct ptr_list *)initializer->expr_list))
+			return LLVMConstNull(dtype);
+		if (is_array_type(sym)) {
+			struct symbol *arr = sym->type == SYM_NODE ? sym->ctype.base_type : sym;
+			struct symbol *elem_sym = arr->ctype.base_type;
+			LLVMTypeRef elem_type = symbol_type(elem_sym);
+			unsigned int elem_bytes = bits_to_bytes(elem_sym->bit_size);
+			unsigned int nr = elem_bytes ? bits_to_bytes(sym->bit_size) / elem_bytes : 0;
+			struct expression *entry;
+			LLVMValueRef *vals;
+			LLVMValueRef res;
+			unsigned int i;
+
+			if (!nr)
+				return LLVMConstNull(dtype);
+			vals = calloc(nr, sizeof(*vals));
+			for (i = 0; i < nr; i++)
+				vals[i] = LLVMConstNull(elem_type);
+			FOR_EACH_PTR(initializer->expr_list, entry) {
+				if (entry->type == EXPR_POS) {
+					unsigned int idx = entry->init_offset / elem_bytes;
+					if (idx < nr) {
+						LLVMValueRef v = expr_to_const_val(module, elem_sym,
+										   entry->init_expr);
+						if (v)
+							vals[idx] = v;
+					}
+				}
+			} END_FOR_EACH_PTR(entry);
+			res = LLVMConstArray(elem_type, vals, nr);
+			free(vals);
+			return res;
+		}
+		warning(initializer->pos, "can't initialize type: %s", show_typename(sym));
+		return NULL;
+	}
+	default:
+		warning(initializer->pos, "can't initialize type: %s", show_typename(sym));
+		return NULL;
+	}
+}
+
 static LLVMValueRef output_data(LLVMModuleRef module, struct symbol *sym)
 {
 	struct expression *initializer = sym->initializer;
@@ -1257,40 +1336,7 @@ static LLVMValueRef output_data(LLVMModuleRef module, struct symbol *sym)
 	LLVMValueRef data;
 	const char *name;
 
-	if (initializer) {
-		switch (initializer->type) {
-		case EXPR_VALUE:
-			initial_value = constant_value(initializer->value, symbol_type(sym));
-			break;
-		case EXPR_FVALUE:
-			initial_value = LLVMConstReal(symbol_type(sym), initializer->fvalue);
-			break;
-		case EXPR_SYMBOL: {
-			struct symbol *sym = initializer->symbol;
-
-			initial_value = LLVMGetNamedGlobal(module, show_ident(sym->ident));
-			if (!initial_value)
-				initial_value = output_data(module, sym);
-			break;
-		}
-		case EXPR_STRING: {
-			const char *s = initializer->string->data;
-			size_t len = initializer->string->length;
-
-			initial_value = const_string(s, len);
-			break;
-		}
-		default:
-			warning(initializer->pos, "can't initialize type: %s", show_typename(sym));
-			initial_value = NULL;
-			break;
-		}
-	} else {
-		LLVMTypeRef type = symbol_type(sym);
-
-		initial_value = LLVMConstNull(type);
-	}
-
+	initial_value = expr_to_const_val(module, sym, initializer);
 	if (!initial_value)
 		return NULL;
 

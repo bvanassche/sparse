@@ -2003,7 +2003,7 @@ static pseudo_t linearize_one_symbol(struct entrypoint *ep, struct symbol *sym)
 	sym->initialized = 1;
 	ad.address = symbol_pseudo(ep, sym);
 
-	if (sym->initializer && !is_scalar_type(sym)) {
+	if (sym->initializer && !is_scalar_type(sym) && sym->bit_size > 0) {
 		// default zero initialization [6.7.9.21]
 		// FIXME: this init the whole aggregate while
 		// only the existing fields need to be initialized.

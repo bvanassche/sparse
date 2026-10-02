@@ -569,6 +569,12 @@ static struct symbol * examine_node_type(struct symbol *sym)
 			struct symbol *node_type = base_type->ctype.base_type;
 			int count = count_array_initializer(node_type, initializer);
 
+			if (standard >= STANDARD_C23 &&
+			    initializer->type == EXPR_INITIALIZER &&
+			    ptr_list_empty((struct ptr_list *)initializer->expr_list))
+				sparse_error(sym->pos,
+					     "empty initializer for incomplete array");
+
 			if (node_type && node_type->bit_size >= 0)
 				bit_size = implicit_array_size(sym, count);
 		}

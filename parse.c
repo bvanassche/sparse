@@ -3456,6 +3456,11 @@ struct token *initializer(struct expression **tree, struct token *token)
 		}
 
 		token = initializer_list(&expr->expr_list, token->next);
+		if (ptr_list_empty((struct ptr_list *)expr->expr_list)) {
+			if (standard < STANDARD_C23 && Wpedantic)
+				warning(expr->pos,
+					"ISO C forbids empty initializer braces before C23");
+		}
 		return expect(token, '}', "at end of initializer");
 	}
 	return assignment_expression(token, tree);

@@ -28,10 +28,12 @@ void block_errors(void)
 	int bad_cast = (auto)1;
 	_Atomic(auto) bad_atomic = 1;
 	auto braced = { 1 };
+	auto empty = {};
 	(void)bad_sz;
 	(void)bad_cast;
 	(void)bad_atomic;
 	(void)braced;
+	(void)empty;
 }
 
 /*
@@ -56,6 +58,7 @@ c23-auto-error.c:29:16: error: Trying to use reserved word 'auto' as identifier
 c23-auto-error.c:29:23: error: Expected ; at end of declaration
 c23-auto-error.c:29:23: error: got bad_atomic
 c23-auto-error.c:30:14: error: auto requires a scalar initializer expression
+c23-auto-error.c:31:14: error: auto requires a scalar initializer expression
 c23-auto-error.c:2:15: error: invalid initializer
 c23-auto-error.c:7:13: error: underspecified symbol 'self' used in its own initializer
 c23-auto-error.c:9:18: error: underspecified symbol 'self_expr' used in its own initializer
@@ -63,6 +66,6 @@ c23-auto-error.c:10:23: error: underspecified symbol 'self_sz' used in its own i
 c23-auto-error.c:10:16: error: cannot size expression
 c23-auto-error.c:25:31: error: underspecified symbol 'shadow' used in its own initializer
 c23-auto-error.c:27:22: error: cannot size expression
-c23-auto-error.c:33:15: error: undefined identifier 'bad_atomic'
+c23-auto-error.c:34:15: error: undefined identifier 'bad_atomic'
  * check-error-end
  */

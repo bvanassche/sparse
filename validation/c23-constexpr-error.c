@@ -50,7 +50,7 @@ void assign_and_vla_test(int n)
 	constexpr int arr[2] = { 1, 2 };
 	arr[0] = 3;
 
-	constexpr int (*vla)[n] = nullptr;
+	constexpr int vla[n] = {};
 	(void)vla;
 }
 
