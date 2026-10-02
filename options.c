@@ -797,6 +797,11 @@ static char **handle_switch_s(const char *arg, char **next)
 		else if (!strcmp(arg, "gnu17") ||
 			 !strcmp(arg, "gnu18"))
 			standard = STANDARD_GNU17;
+		else if (!strcmp(arg, "c23") || !strcmp(arg, "c2x") ||
+			 !strcmp(arg, "iso9899:2024"))
+			standard = STANDARD_C23;
+		else if (!strcmp(arg, "gnu23") || !strcmp(arg, "gnu2x"))
+			standard = STANDARD_GNU23;
 
 		else
 			die("Unsupported C dialect");

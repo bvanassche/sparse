@@ -111,6 +111,10 @@ void predefined_macros(void)
 	case STANDARD_GNU17:
 		predefine("__STDC_VERSION__", 1, "201710L");
 		break;
+	case STANDARD_C23:
+	case STANDARD_GNU23:
+		predefine("__STDC_VERSION__", 1, "202311L");
+		break;
 	}
 	if (!(standard & STANDARD_GNU) && (standard != STANDARD_NONE))
 		predefine("__STRICT_ANSI__", 1, "1");
