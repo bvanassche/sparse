@@ -43,12 +43,19 @@ IDENT(_Noreturn);
 IDENT_RESERVED(_Static_assert);
 IDENT(_Thread_local);
 
+/* C23 keywords */
+IDENT(alignas);
+IDENT(alignof);
+IDENT(static_assert);
+IDENT(thread_local);
+
 /* Special case for L'\t' */
 IDENT(L);
 
 /* Extended gcc identifiers */
 IDENT(asm); IDENT_RESERVED(__asm); IDENT_RESERVED(__asm__);
-IDENT(alignof); IDENT_RESERVED(__alignof); IDENT_RESERVED(__alignof__); 
+IDENT_RESERVED(__alignof);
+IDENT_RESERVED(__alignof__);
 IDENT_RESERVED(__sizeof_ptr__);
 IDENT_RESERVED(__builtin_types_compatible_p);
 IDENT_RESERVED(__builtin_offsetof);

@@ -139,6 +139,7 @@ extern struct symbol *ctype_integer(int size, int want_unsigned);
 extern int inline_function(struct expression *expr, struct symbol *sym);
 extern void uninline(struct symbol *sym);
 extern void init_parser(int);
+extern void init_parser_finalize(void);
 
 struct token *expect(struct token *, int, const char *);
 

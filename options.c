@@ -11,6 +11,7 @@
 #include "lib.h"
 #include "machine.h"
 #include "target.h"
+#include "parse.h"
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1068,4 +1069,5 @@ void handle_switch_finalize(void)
 {
 	handle_switch_v_finalize();
 	handle_switch_W_finalize();
+	init_parser_finalize();
 }
