@@ -640,7 +640,7 @@ static struct token *dup_token(const struct token *token, struct position *strea
 static struct token **copy(struct token **where, struct token *list, int *count)
 {
 	int need_copy = --*count;
-	while (!eof_token(list)) {
+	do {
 		struct token *token;
 		if (need_copy)
 			token = dup_token(list, &list->pos);
@@ -651,7 +651,7 @@ static struct token **copy(struct token **where, struct token *list, int *count)
 		*where = token;
 		where = &token->next;
 		list = list->next;
-	}
+	} while (!eof_token(list));
 	*where = &eof_token_entry;
 	return where;
 }
@@ -677,11 +677,26 @@ static int handle_kludge(const struct token **p, struct arg *args)
 	}
 }
 
-static struct token **substitute(struct token **list, const struct token *body, struct arg *args)
+static inline int arg_empty(struct arg *arg)
 {
-	struct position *base_pos = &(*list)->pos;
+	struct token *t = arg->expanded;
+
+	if (!t)
+		return 1;
+	while (token_type(t) == TOKEN_UNTAINT)
+		t = t->next;
+	return eof_token(t);
+}
+
+static struct token **substitute_tokens(struct token **list,
+					struct position *base_pos,
+					const struct token *body,
+					struct arg *args, int vararg_num)
+{
 	int *count;
+	int one;
 	enum {Normal, Placeholder, Concat} state = Normal;
+	int extra_whitespace = 0;
 
 	for (; !eof_token(body); body = body->next) {
 		struct token *added, *arg;
@@ -712,9 +727,57 @@ static struct token **substitute(struct token **list, const struct token *body, 
 			tail = &added->next;
 			break;
 
+		case TOKEN_STR_VA_OPT: {
+			struct token *inner = &eof_token_entry;
+
+			if (vararg_num >= 0 && !arg_empty(&args[vararg_num]))
+				substitute_tokens(&inner, base_pos,
+						  body->target, args,
+						  vararg_num);
+			added = stringify(inner);
+			added->pos.stream = base_pos->stream;
+			added->pos.line = base_pos->line;
+			added->pos.pos = base_pos->pos;
+			added->pos.newline = body->pos.newline;
+			added->pos.whitespace =
+				body->pos.whitespace || extra_whitespace;
+			extra_whitespace = 0;
+			tail = &added->next;
+			break;
+		}
+
+		case TOKEN_VA_OPT: {
+			struct token *inner = &eof_token_entry;
+
+			if (vararg_num >= 0 && !arg_empty(&args[vararg_num]))
+				substitute_tokens(&inner, base_pos,
+						  body->target, args,
+						  vararg_num);
+			if (eof_token(inner)) {
+				if (body->pos.whitespace && state != Concat &&
+				    token_type(body->next) != TOKEN_CONCAT)
+					extra_whitespace = 1;
+				if (state == Concat)
+					state = Normal;
+				else if (token_type(body->next) == TOKEN_CONCAT)
+					state = Placeholder;
+				else
+					state = Normal;
+				continue;
+			}
+			arg = inner;
+			one = 1;
+			count = &one;
+			goto copy_arg;
+		}
+
 		case TOKEN_STR_ARGUMENT:
 			arg = args[body->argnum].str;
 			count = &args[body->argnum].n_str;
+			if (eof_token(arg)) {
+				state = Normal;
+				continue;
+			}
 			goto copy_arg;
 
 		case TOKEN_QUOTED_ARGUMENT:
@@ -740,6 +803,10 @@ static struct token **substitute(struct token **list, const struct token *body, 
 			tail = copy(&added, arg, count);
 			added->pos.newline = body->pos.newline;
 			added->pos.whitespace = body->pos.whitespace;
+			if (extra_whitespace) {
+				added->pos.whitespace = 1;
+				extra_whitespace = 0;
+			}
 			break;
 
 		case TOKEN_CONCAT:
@@ -754,6 +821,10 @@ static struct token **substitute(struct token **list, const struct token *body, 
 			if (token_type(body) == TOKEN_IDENT &&
 			    added->ident->tainted)
 				added->pos.noexpand = 1;
+			if (extra_whitespace) {
+				added->pos.whitespace = 1;
+				extra_whitespace = 0;
+			}
 			tail = &added->next;
 			break;
 		}
@@ -774,6 +845,14 @@ static struct token **substitute(struct token **list, const struct token *body, 
 	}
 	*list = &eof_token_entry;
 	return list;
+}
+
+static struct token **substitute(struct token **list, const struct token *body,
+				 struct arg *args, int vararg_num)
+{
+	struct position base_pos = (*list)->pos;
+
+	return substitute_tokens(list, &base_pos, body, args, vararg_num);
 }
 
 static bool parse_has_include(struct token **list, int how);
@@ -811,7 +890,13 @@ static int expand(struct token **list, struct symbol *sym)
 	struct token **tail;
 	struct token *expansion = sym->expansion;
 	int nargs = sym->arglist ? sym->arglist->count.normal : 0;
+	int vararg_num = (sym->arglist && sym->arglist->count.vararg) ?
+				 (sym->arglist->count.normal - 1) :
+				 -1;
 	struct arg args[nargs ? nargs : 1];
+
+	if (nargs)
+		memset(args, 0, nargs * sizeof(args[0]));
 
 	if (expanding->tainted) {
 		token->pos.noexpand = 1;
@@ -855,7 +940,7 @@ static int expand(struct token **list, struct symbol *sym)
 	expanding->tainted = 1;
 
 	last = token->next;
-	tail = substitute(list, expansion, args);
+	tail = substitute(list, expansion, args, vararg_num);
 	/*
 	 * Note that it won't be eof - at least TOKEN_UNTAINT will be there.
 	 * We still can lose the newline flag if the sucker expands to nothing,
@@ -2147,6 +2232,8 @@ static int handle_argv_include(struct stream *stream, struct token **list, struc
 	return handle_include_path(stream, list, token, 2);
 }
 
+static int token_list_different(struct token *list1, struct token *list2);
+
 static int token_different(struct token *t1, struct token *t2)
 {
 	int different;
@@ -2163,6 +2250,10 @@ static int token_different(struct token *t1, struct token *t2)
 	case TOKEN_CONCAT:
 	case TOKEN_GNU_KLUDGE:
 		different = 0;
+		break;
+	case TOKEN_VA_OPT:
+	case TOKEN_STR_VA_OPT:
+		different = token_list_different(t1->target, t2->target);
 		break;
 	case TOKEN_NUMBER:
 		different = strcmp(t1->number, t2->number);
@@ -2240,6 +2331,8 @@ static struct token *parse_arguments(struct token *list)
 	while (token_type(arg) == TOKEN_IDENT) {
 		if (arg->ident == &__VA_ARGS___ident)
 			goto Eva_args;
+		if (arg->ident == &__VA_OPT___ident)
+			goto Eva_opt;
 		if (!++count->normal)
 			goto Eargs;
 		next = arg->next;
@@ -2263,6 +2356,7 @@ static struct token *parse_arguments(struct token *list)
 			if (match_op(next->next, ')')) {
 				set_arg_count(next);
 				next->count.vararg = 1;
+				count->vararg = 1;
 				next = next->next;
 				arg->next->next = &eof_token_entry;
 				return next->next;
@@ -2290,6 +2384,7 @@ static struct token *parse_arguments(struct token *list)
 			goto Eargs;
 		set_arg_count(next);
 		next->count.vararg = 1;
+		count->vararg = 1;
 		next = next->next;
 		arg->next->next = &eof_token_entry;
 		return next;
@@ -2314,6 +2409,10 @@ Ebadstuff:
 	return NULL;
 Enotclosed:
 	sparse_error(arg->pos, "missing ')' in macro parameter list");
+	return NULL;
+Eva_opt:
+	sparse_error(arg->pos,
+		     "__VA_OPT__ cannot appear in a macro parameter list");
 	return NULL;
 Eva_args:
 	sparse_error(arg->pos, "__VA_ARGS__ can only appear in the expansion of a C99 variadic macro");
@@ -2363,11 +2462,26 @@ static int try_arg(struct token *token, enum token_type type, struct token *argl
 	return 0;
 }
 
+static struct token *handle_va_opt(struct token **p, struct token *arglist);
+static int parse_expansion_tokens(struct token **expansion_p,
+				  struct token *arglist);
+
 static struct token *handle_hash(struct token **p, struct token *arglist)
 {
 	struct token *token = *p;
 	if (arglist) {
 		struct token *next = token->next;
+		if (token_type(next) == TOKEN_IDENT &&
+		    next->ident == &__VA_OPT___ident) {
+			next = handle_va_opt(&token->next, arglist);
+			if (!next)
+				return NULL;
+			token_type(next) = TOKEN_STR_VA_OPT;
+			next->pos.whitespace = token->pos.whitespace;
+			__free_token(token);
+			*p = next;
+			return next;
+		}
 		if (!try_arg(next, TOKEN_STR_ARGUMENT, arglist))
 			goto Equote;
 		next->pos.whitespace = token->pos.whitespace;
@@ -2412,6 +2526,11 @@ static struct token *handle_hashhash(struct token *token, struct token *arglist)
 			t = handle_hash(&concat->next, arglist);
 			if (!t)
 				return NULL;
+		} else if (token_type(t) == TOKEN_IDENT &&
+			   t->ident == &__VA_OPT___ident) {
+			t = handle_va_opt(&concat->next, arglist);
+			if (!t)
+				return NULL;
 		}
 
 		is_arg = try_arg(t, TOKEN_QUOTED_ARGUMENT, arglist);
@@ -2437,43 +2556,146 @@ Econcat:
 	return NULL;
 }
 
-static struct token *parse_expansion(struct token *expansion, struct token *arglist, struct ident *name)
+static struct token *handle_va_opt(struct token **p, struct token *arglist)
 {
-	struct token *token = expansion;
+	struct token *token = *p;
+	struct token *lparen = token->next;
+	struct token *cur, *prev, *body;
+	int nesting = 1;
+
+	if (!arglist || !arglist->count.vararg) {
+		sparse_error(
+			token->pos,
+			"__VA_OPT__ can only appear in the expansion of a variadic macro");
+		return NULL;
+	}
+	if (!match_op(lparen, '(')) {
+		sparse_error(token->pos, "expected '(' after __VA_OPT__");
+		return NULL;
+	}
+	if (standard < STANDARD_C23 && Wpedantic)
+		warning(token->pos, "__VA_OPT__ is a C23 feature");
+
+	for (cur = arglist->next; !eof_token(cur); cur = cur->next->next) {
+		if (cur->next->count.vararg) {
+			if (!++cur->next->count.normal) {
+				sparse_error(
+					token->pos,
+					"too many instances of argument in body");
+				return NULL;
+			}
+			break;
+		}
+	}
+
+	prev = lparen;
+	for (cur = lparen->next; !eof_token(cur); prev = cur, cur = cur->next) {
+		if (token_type(cur) == TOKEN_IDENT &&
+		    cur->ident == &__VA_OPT___ident) {
+			sparse_error(
+				cur->pos,
+				"__VA_OPT__ cannot appear within __VA_OPT__");
+			return NULL;
+		}
+		if (match_op(cur, '('))
+			nesting++;
+		else if (match_op(cur, ')')) {
+			if (!--nesting)
+				break;
+		}
+	}
+	if (nesting) {
+		sparse_error(token->pos, "unterminated __VA_OPT__");
+		return NULL;
+	}
+
+	/* cur is ')' */
+	if (lparen->next != cur && match_op(lparen->next, SPECIAL_HASHHASH)) {
+		sparse_error(
+			lparen->next->pos,
+			"'##' cannot appear at the beginning of __VA_OPT__");
+		return NULL;
+	}
+	if (prev != lparen && match_op(prev, SPECIAL_HASHHASH)) {
+		sparse_error(prev->pos,
+			     "'##' cannot appear at the end of __VA_OPT__");
+		return NULL;
+	}
+
+	if (lparen->next == cur) {
+		body = &eof_token_entry;
+	} else {
+		body = lparen->next;
+		prev->next = &eof_token_entry;
+		if (parse_expansion_tokens(&body, arglist) < 0)
+			return NULL;
+	}
+
+	token_type(token) = TOKEN_VA_OPT;
+	token->target = body;
+	token->next = cur->next;
+	__free_token(lparen);
+	__free_token(cur);
+	return token;
+}
+
+static int parse_expansion_tokens(struct token **expansion_p,
+				  struct token *arglist)
+{
+	struct token *token = *expansion_p;
 	struct token **p;
 
 	if (match_op(token, SPECIAL_HASHHASH))
 		goto Econcat;
 
-	for (p = &expansion; !eof_token(token); p = &token->next, token = *p) {
+	for (p = expansion_p; !eof_token(token); p = &token->next, token = *p) {
 		if (match_op(token, '#')) {
 			token = handle_hash(p, arglist);
 			if (!token)
-				return NULL;
+				return -1;
+		} else if (token_type(token) == TOKEN_IDENT &&
+			   token->ident == &__VA_OPT___ident) {
+			token = handle_va_opt(p, arglist);
+			if (!token)
+				return -1;
 		}
 		if (match_op(token->next, SPECIAL_HASHHASH)) {
 			token = handle_hashhash(token, arglist);
 			if (!token)
-				return NULL;
-		} else {
+				return -1;
+		} else if (token_type(token) == TOKEN_IDENT) {
 			try_arg(token, TOKEN_MACRO_ARGUMENT, arglist);
 		}
 		if (token_type(token) == TOKEN_ERROR)
 			goto Earg;
 	}
+	return 0;
+
+Econcat:
+	sparse_error(token->pos,
+		     "'##' cannot appear at the ends of macro expansion");
+	return -1;
+Earg:
+	sparse_error(token->pos, "too many instances of argument in body");
+	return -1;
+}
+
+static struct token *parse_expansion(struct token *expansion, struct token *arglist, struct ident *name)
+{
+	struct token *token;
+	struct token **p;
+
+	if (parse_expansion_tokens(&expansion, arglist) < 0)
+		return NULL;
+
+	for (p = &expansion; !eof_token(*p); p = &(*p)->next)
+		;
 	token = alloc_token(&expansion->pos);
 	token_type(token) = TOKEN_UNTAINT;
 	token->ident = name;
 	token->next = *p;
 	*p = token;
 	return expansion;
-
-Econcat:
-	sparse_error(token->pos, "'##' cannot appear at the ends of macro expansion");
-	return NULL;
-Earg:
-	sparse_error(token->pos, "too many instances of argument in body");
-	return NULL;
 }
 
 static int do_define(struct position pos, struct token *token, struct ident *name,
@@ -2481,6 +2703,12 @@ static int do_define(struct position pos, struct token *token, struct ident *nam
 {
 	struct symbol *sym;
 	int ret = 1;
+
+	if (name == &__VA_ARGS___ident || name == &__VA_OPT___ident) {
+		sparse_error(pos, "\"%s\" cannot be used as a macro name",
+			     show_ident(name));
+		return 1;
+	}
 
 	expansion = parse_expansion(expansion, arglist, name);
 	if (!expansion)
@@ -2653,6 +2881,13 @@ static int do_handle_undef(struct stream *stream, struct token **line, struct to
 
 	if (token_type(left) != TOKEN_IDENT) {
 		sparse_error(token->pos, "expected identifier to 'undef'");
+		return 1;
+	}
+
+	if (left->ident == &__VA_ARGS___ident ||
+	    left->ident == &__VA_OPT___ident) {
+		warning(token->pos, "undefining \"%s\"",
+			show_ident(left->ident));
 		return 1;
 	}
 
@@ -3597,6 +3832,44 @@ static int is_VA_ARGS_token(struct token *token)
 		(token->ident == &__VA_ARGS___ident);
 }
 
+static void dump_macro_tokens(struct token *token, struct token **args,
+			      bool top_level)
+{
+	bool first = !top_level;
+
+	while (top_level ? token_type(token) != TOKEN_UNTAINT :
+			   !eof_token(token)) {
+		struct token *next = token->next;
+
+		if (!first && token->pos.whitespace)
+			putchar(' ');
+		first = false;
+		switch (token_type(token)) {
+		case TOKEN_CONCAT:
+			printf("##");
+			break;
+		case TOKEN_STR_VA_OPT:
+			printf("#");
+			/* fall-through */
+		case TOKEN_VA_OPT:
+			printf("__VA_OPT__(");
+			dump_macro_tokens(token->target, args, false);
+			putchar(')');
+			break;
+		case TOKEN_STR_ARGUMENT:
+			printf("#");
+			/* fall-through */
+		case TOKEN_QUOTED_ARGUMENT:
+		case TOKEN_MACRO_ARGUMENT:
+			token = args[token->argnum];
+			/* fall-through */
+		default:
+			printf("%s", show_token(token));
+		}
+		token = next;
+	}
+}
+
 static void dump_macro(struct symbol *sym)
 {
 	int nargs = sym->arglist ? sym->arglist->count.normal : 0;
@@ -3622,27 +3895,7 @@ static void dump_macro(struct symbol *sym)
 		putchar(')');
 	}
 
-	token = sym->expansion;
-	while (token_type(token) != TOKEN_UNTAINT) {
-		struct token *next = token->next;
-		if (token->pos.whitespace)
-			putchar(' ');
-		switch (token_type(token)) {
-		case TOKEN_CONCAT:
-			printf("##");
-			break;
-		case TOKEN_STR_ARGUMENT:
-			printf("#");
-			/* fall-through */
-		case TOKEN_QUOTED_ARGUMENT:
-		case TOKEN_MACRO_ARGUMENT:
-			token = args[token->argnum];
-			/* fall-through */
-		default:
-			printf("%s", show_token(token));
-		}
-		token = next;
-	}
+	dump_macro_tokens(sym->expansion, args, true);
 	putchar('\n');
 }
 
