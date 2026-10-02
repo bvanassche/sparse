@@ -2607,12 +2607,14 @@ static struct entrypoint *linearize_fn(struct symbol *sym, struct symbol *base_t
 	add_one_insn(ep, entry);
 	ep->entry = entry;
 
-	concat_symbol_list(base_type->arguments, &ep->syms);
-
 	/* FIXME!! We should do something else about varargs.. */
 	i = 0;
 	FOR_EACH_PTR(base_type->arguments, arg) {
-		linearize_argument(ep, arg, ++i);
+		++i;
+		if (!arg->ident)
+			continue;
+		add_symbol(&ep->syms, arg);
+		linearize_argument(ep, arg, i);
 	} END_FOR_EACH_PTR(arg);
 
 	result = linearize_fn_statement(ep, stmt);

@@ -1702,6 +1702,8 @@ static struct token *declaration_specifiers(struct token *token, struct decl_sta
 				specifier_conflict(token->pos,
 						   seen & s->op->test,
 						   token->ident);
+				ctx->ctype.base_type = &bad_ctype;
+				seen |= Set_S;
 				break;
 			}
 			seen |= s->op->set;
@@ -2772,10 +2774,12 @@ static struct token *parameter_type_list(struct token *token, struct symbol *fn)
 		sym = alloc_symbol(token->pos, SYM_NODE);
 		token = parameter_declaration(token, sym);
 		if (sym->ctype.base_type == &void_ctype) {
-			/* Special case: (void) */
-			if (!*list && !sym->ident)
+			/* Special case: sole unnamed unqualified (void) */
+			if (!*list && !sym->ident && match_op(token, ')') &&
+			    !(sym->ctype.modifiers & (MOD_QUALIFIER | MOD_STORAGE | MOD_ATOMIC)))
 				break;
-			warning(token->pos, "void parameter");
+			sparse_error(sym->pos, "'void' must be the only parameter");
+			sym->ctype.base_type = &bad_ctype;
 		}
 		add_symbol(list, sym);
 		if (!match_op(token, ','))
@@ -2917,17 +2921,22 @@ struct token *initializer(struct expression **tree, struct token *token)
 
 static void declare_argument(struct symbol *sym, struct symbol *fn)
 {
-	if (!sym->ident) {
-		sparse_error(sym->pos, "no identifier for function argument");
-		return;
-	}
 	if (sym->ctype.base_type == &incomplete_ctype) {
 		sym->ctype.base_type = &int_ctype;
 
 		if (Wimplicit_int) {
-			sparse_error(sym->pos, "missing type declaration for parameter '%s'",
-				show_ident(sym->ident));
+			if (sym->ident)
+				sparse_error(sym->pos, "missing type declaration for parameter '%s'",
+					show_ident(sym->ident));
+			else
+				sparse_error(sym->pos, "missing type declaration for parameter");
 		}
+	}
+	if (!sym->ident) {
+		if (standard < STANDARD_C23 && sym->ctype.base_type != &bad_ctype)
+			sparse_error(sym->pos,
+				     "omitting parameter name in function definition is a C23 feature");
+		return;
 	}
 	bind_symbol(sym, sym->ident, NS_SYMBOL);
 }
