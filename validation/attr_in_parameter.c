@@ -7,6 +7,8 @@ static void g(int A *x)
 	f(x, x);
 	p = q;
 }
+static void h(__attribute__((unused)) int x);
+
 /*
  * check-name: attribute after ( in direct-declarator
  */
