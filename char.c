@@ -6,6 +6,54 @@
 #include "expression.h"
 #include "char.h"
 
+static const char *parse_ucn(const char *p, const char *end, int digits,
+			     unsigned *cp, struct position pos)
+{
+	unsigned val = 0;
+	int i;
+
+	for (i = 0; i < digits; i++) {
+		unsigned d;
+		if (p >= end || (d = hexval(*p)) > 15) {
+			sparse_error(pos, "incomplete universal character name");
+			*cp = 0;
+			return p;
+		}
+		val = (val << 4) + d;
+		p++;
+	}
+	if ((val >= 0xd800 && val <= 0xdfff) || val > 0x10ffff) {
+		sparse_error(pos, "invalid universal character name");
+		val = 0;
+	}
+	*cp = val;
+	return p;
+}
+
+static int encode_utf8(unsigned cp, char out[4])
+{
+	if (cp <= 0x7f) {
+		out[0] = cp;
+		return 1;
+	}
+	if (cp <= 0x7ff) {
+		out[0] = 0xc0 | (cp >> 6);
+		out[1] = 0x80 | (cp & 0x3f);
+		return 2;
+	}
+	if (cp <= 0xffff) {
+		out[0] = 0xe0 | (cp >> 12);
+		out[1] = 0x80 | ((cp >> 6) & 0x3f);
+		out[2] = 0x80 | (cp & 0x3f);
+		return 3;
+	}
+	out[0] = 0xf0 | (cp >> 18);
+	out[1] = 0x80 | ((cp >> 12) & 0x3f);
+	out[2] = 0x80 | ((cp >> 6) & 0x3f);
+	out[3] = 0x80 | (cp & 0x3f);
+	return 4;
+}
+
 static const char *parse_escape(const char *p, unsigned *val, const char *end, int bits, struct position pos)
 {
 	unsigned c = (unsigned char)*p++;
@@ -26,6 +74,11 @@ static const char *parse_escape(const char *p, unsigned *val, const char *end, i
 	case 'f': c = '\f'; break;
 	case 'r': c = '\r'; break;
 	case 'e': c = '\e'; break;
+	case 'u':
+	case 'U':
+		p = parse_ucn(p, end, c == 'u' ? 4 : 8, &c, pos);
+		*val = c;
+		return p;
 	case 'x': {
 		unsigned mask = -(1U << (bits - 4));
 		for (c = 0; p < end; c = (c << 4) + d) {
@@ -75,6 +128,7 @@ void get_char_constant(struct token *token, unsigned long long *val)
 	switch (type) {
 	case TOKEN_CHAR:
 	case TOKEN_WIDE_CHAR:
+	case TOKEN_UTF8_CHAR:
 		p = token->string->data;
 		end = p + token->string->length - 1;
 		if (end == p) {
@@ -86,14 +140,34 @@ void get_char_constant(struct token *token, unsigned long long *val)
 	case TOKEN_CHAR_EMBEDDED_0 ... TOKEN_CHAR_EMBEDDED_3:
 		end = p + type - TOKEN_CHAR;
 		break;
-	default:
+	case TOKEN_WIDE_CHAR_EMBEDDED_0 ... TOKEN_WIDE_CHAR_EMBEDDED_3:
 		end = p + type - TOKEN_WIDE_CHAR;
+		break;
+	default:
+		end = p + type - TOKEN_UTF8_CHAR;
+		break;
 	}
 	p = parse_escape(p, &v, end,
-			type < TOKEN_WIDE_CHAR ? bits_in_char : wchar_ctype->bit_size, token->pos);
-	if (p != end)
+			 (type >= TOKEN_WIDE_CHAR &&
+			  type <= TOKEN_WIDE_CHAR_EMBEDDED_3) ?
+				 wchar_ctype->bit_size :
+				 bits_in_char,
+			 token->pos);
+	if (type >= TOKEN_UTF8_CHAR && type <= TOKEN_UTF8_CHAR_EMBEDDED_3) {
+		if (p != end || v > 0xff ||
+		    (token->embedded[0] == '\\' &&
+		     (token->embedded[1] == 'u' || token->embedded[1] == 'U') &&
+		     v > 0x7f) ||
+		    (type == TOKEN_UTF8_CHAR && token->string->data[0] == '\\' &&
+		     (token->string->data[1] == 'u' ||
+		      token->string->data[1] == 'U') &&
+		     v > 0x7f))
+			sparse_error(token->pos,
+				     "multi-character UTF-8 character constant");
+	} else if (p != end) {
 		warning(token->pos,
 			"multi-character character constant");
+	}
 	*val = v;
 }
 
@@ -103,6 +177,7 @@ struct token *get_string_constant(struct token *token, struct expression *expr)
 	struct token *next = token->next, *done = NULL;
 	int stringtype = token_type(token);
 	int is_wide = stringtype == TOKEN_WIDE_STRING;
+	int is_utf8 = stringtype == TOKEN_UTF8_STRING;
 	static char buffer[MAX_STRING];
 	int len = 0;
 	int bits;
@@ -112,6 +187,12 @@ struct token *get_string_constant(struct token *token, struct expression *expr)
 		switch (token_type(next)) {
 		case TOKEN_WIDE_STRING:
 			is_wide = 1;
+			next = next->next;
+			break;
+		case TOKEN_UTF8_STRING:
+			is_utf8 = 1;
+			next = next->next;
+			break;
 		case TOKEN_STRING:
 			next = next->next;
 			break;
@@ -119,18 +200,35 @@ struct token *get_string_constant(struct token *token, struct expression *expr)
 			done = next;
 		}
 	}
+	if (is_wide && is_utf8) {
+		sparse_error(token->pos,
+			     "unsupported non-standard concatenation of string literals");
+		is_utf8 = 0;
+	}
 	bits = is_wide ? wchar_ctype->bit_size: bits_in_char;
 	while (token != done) {
 		unsigned v;
 		const char *p = token->string->data;
 		const char *end = p + token->string->length - 1;
 		while (p < end) {
+			bool is_ucn = (*p == '\\' && p + 1 < end &&
+				       (p[1] == 'u' || p[1] == 'U'));
 			if (*p == '\\')
 				esc_count++;
 			p = parse_escape(p, &v, end, bits, token->pos);
-			if (len < MAX_STRING)
-				buffer[len] = v;
-			len++;
+			if (is_ucn && !is_wide) {
+				char utf8[4];
+				int i, n = encode_utf8(v, utf8);
+				for (i = 0; i < n; i++) {
+					if (len < MAX_STRING)
+						buffer[len] = utf8[i];
+					len++;
+				}
+			} else {
+				if (len < MAX_STRING)
+					buffer[len] = v;
+				len++;
+			}
 		}
 		token = token->next;
 	}
@@ -148,5 +246,6 @@ struct token *get_string_constant(struct token *token, struct expression *expr)
 	}
 	expr->string = string;
 	expr->wide = is_wide;
+	expr->utf8 = is_utf8;
 	return token;
 }

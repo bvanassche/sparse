@@ -135,7 +135,8 @@ static struct symbol *evaluate_string(struct expression *expr)
 	struct expression *addr = alloc_expression(expr->pos, EXPR_SYMBOL);
 	struct expression *initstr = alloc_expression(expr->pos, EXPR_STRING);
 	unsigned int length = expr->string->length;
-	struct symbol *char_type = expr->wide ? wchar_ctype : &char_ctype;
+	struct symbol *char_type = expr->wide ? wchar_ctype :
+		(expr->utf8 && standard >= STANDARD_C23) ? &uchar_ctype : &char_ctype;
 
 	sym->array_size = alloc_const_expression(expr->pos, length);
 	sym->bit_size = length * char_type->bit_size;
@@ -148,6 +149,8 @@ static struct symbol *evaluate_string(struct expression *expr)
 	sym->evaluated = 1;
 
 	initstr->ctype = sym;
+	initstr->wide = expr->wide;
+	initstr->utf8 = expr->utf8;
 	initstr->string = expr->string;
 
 	array->array_size = sym->array_size;
@@ -1599,7 +1602,7 @@ static int whitelist_pointers(struct symbol *t1, struct symbol *t2)
 	if (t1 == t2)
 		return 1;
 	if (t1->rank == -2 && t2->rank == -2)
-		return 1;
+		return !Wtypesign && !Wpedantic && standard < STANDARD_C23;
 	if (t1->rank != t2->rank)
 		return 0;
 	return !Wtypesign;

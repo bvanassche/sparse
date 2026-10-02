@@ -599,17 +599,23 @@ struct token *primary_expression(struct token *token, struct expression **tree)
 	struct expression *expr = NULL;
 
 	switch (token_type(token)) {
-	case TOKEN_CHAR ... TOKEN_WIDE_CHAR_EMBEDDED_3:
+	case TOKEN_CHAR ... TOKEN_UTF8_CHAR_EMBEDDED_3:
 		expr = alloc_expression(token->pos, EXPR_VALUE);
 		expr->flags = CEF_SET_CHAR;
 		get_char_constant(token, &expr->value);
 
-		// TODO: handle 'u8', 'u' & 'U' prefixes.
-		if (token_type(token) < TOKEN_WIDE_CHAR) {
+		// TODO: handle 'u' & 'U' prefixes.
+		if (token_type(token) <= TOKEN_CHAR_EMBEDDED_3) {
 			expr->ctype = &char_ctype;
 			cast_value(expr, &int_ctype, expr);
-		} else {
+		} else if (token_type(token) <= TOKEN_WIDE_CHAR_EMBEDDED_3) {
 			expr->ctype = wchar_ctype;
+		} else {
+			if (standard < STANDARD_C23 && Wpedantic)
+				warning(token->pos,
+					"UTF-8 character constants are a C23 feature");
+			expr->ctype = &uchar_ctype;
+			cast_value(expr, &uchar_ctype, expr);
 		}
 		token = token->next;
 		break;
@@ -709,6 +715,7 @@ struct token *primary_expression(struct token *token, struct expression **tree)
 
 	case TOKEN_STRING:
 	case TOKEN_WIDE_STRING:
+	case TOKEN_UTF8_STRING:
 		expr = alloc_expression(token->pos, EXPR_STRING);
 		token = get_string_constant(token, expr);
 		break;
