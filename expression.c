@@ -646,13 +646,21 @@ static struct token *type_info_expression(struct token *token,
 	struct expression **tree, int type)
 {
 	struct expression *expr = alloc_expression(token->pos, type);
+	struct ident *op_ident = token->ident;
+	bool std_alignof = (op_ident == &_Alignof_ident ||
+			    op_ident == &alignof_ident);
 	struct token *p;
 
 	*tree = expr;
 	expr->flags = CEF_SET_ICE; /* XXX: VLA support will need that changed */
 	token = token->next;
-	if (!match_op(token, '(') || !lookup_type(token->next))
+	if (!match_op(token, '(') || !lookup_type(token->next)) {
+		if (std_alignof && Wpedantic)
+			warning(expr->pos,
+				"ISO C does not allow '%s' on an expression",
+				show_ident(op_ident));
 		return unary_expression(token, &expr->cast_expression);
+	}
 	p = token;
 	token = typename(token->next, &expr->cast_type, NULL);
 
@@ -672,6 +680,10 @@ static struct token *type_info_expression(struct token *token,
 	 */
 	if (match_op(token, '{')) {
 		struct expression *cast = alloc_expression(p->pos, EXPR_CAST);
+		if (std_alignof && Wpedantic)
+			warning(expr->pos,
+				"ISO C does not allow '%s' on an expression",
+				show_ident(op_ident));
 		cast->cast_type = expr->cast_type;
 		expr->cast_type = NULL;
 		expr->cast_expression = cast;
@@ -691,6 +703,7 @@ static struct token *unary_expression(struct token *token, struct expression **t
 				int type;
 			} type_information[] = {
 				{ &sizeof_ident, EXPR_SIZEOF },
+				{ &alignof_ident, EXPR_ALIGNOF },
 				{ &__alignof___ident, EXPR_ALIGNOF },
 				{ &__alignof_ident, EXPR_ALIGNOF },
 				{ &_Alignof_ident, EXPR_ALIGNOF },

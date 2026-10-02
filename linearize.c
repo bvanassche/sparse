@@ -1995,7 +1995,7 @@ static pseudo_t linearize_one_symbol(struct entrypoint *ep, struct symbol *sym)
 		return VOID;
 
 	/* We need to output these puppies some day too.. */
-	if (sym->ctype.modifiers & (MOD_STATIC | MOD_TOPLEVEL))
+	if (sym->ctype.modifiers & (MOD_STATIC | MOD_TOPLEVEL | MOD_TLS))
 		return VOID;
 
 	sym->initialized = 1;

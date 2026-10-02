@@ -465,6 +465,7 @@ static struct init_keyword {
 	struct symbol_op *op;
 	struct symbol *type;
 	unsigned long mods;
+	int std;
 } typedefs[] = {
 #define N(I, O,...)	{ I, O,##__VA_ARGS__ }
 #define D(I, O,...)	N(I,O,##__VA_ARGS__ ),		\
@@ -481,6 +482,7 @@ static struct init_keyword {
 	N("extern",		&extern_op,	.mods = MOD_EXTERN),
 	N("__thread",		&thread_op),
 	N("_Thread_local",	&thread_op),
+	N("thread_local",	&thread_op,	.std = STANDARD_C23),
 
 	A("inline",		&inline_op,	.mods = MOD_INLINE),
 
@@ -498,6 +500,7 @@ static struct init_keyword {
 	N("_Atomic",		&atomic_op,	.mods = MOD_ATOMIC),
 	N("_Noreturn",		&noreturn_op,	.mods = MOD_NORETURN),
 	N("_Alignas",		&alignas_op),
+	N("alignas",		&alignas_op,	.std = STANDARD_C23),
 
 	U("attribute",		&attribute_op),
 
@@ -546,6 +549,7 @@ static struct init_keyword {
 	N("__context__",	&__context___op),
 	N("__range__",		&range_op),
 	N("_Static_assert",	&static_assert_op),
+	N("static_assert",	&static_assert_op, .std = STANDARD_C23),
 
 	/* Attributes */
 	D("packed",		&packed_op),
@@ -607,14 +611,23 @@ static void init_keyword(int stream, struct init_keyword *kw, enum namespace ns)
 	sym->op = kw->op;
 }
 
+static int parser_stream;
+
 void init_parser(int stream)
 {
 	int i;
 
-	for (i = 0; i < ARRAY_SIZE(typedefs); i++)
+	parser_stream = stream;
+	for (i = 0; i < ARRAY_SIZE(typedefs); i++) {
+		if (typedefs[i].std)
+			continue;
 		init_keyword(stream, &typedefs[i], NS_TYPEDEF);
-	for (i = 0; i < ARRAY_SIZE(keywords); i++)
+	}
+	for (i = 0; i < ARRAY_SIZE(keywords); i++) {
+		if (keywords[i].std)
+			continue;
 		init_keyword(stream, &keywords[i], NS_KEYWORD);
+	}
 
 	for (i = 0; i < ARRAY_SIZE(ignored_attributes); i++) {
 		const char * name = ignored_attributes[i];
@@ -627,6 +640,23 @@ void init_parser(int stream)
 	}
 }
 
+void init_parser_finalize(void)
+{
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(typedefs); i++) {
+		if (typedefs[i].std && standard >= typedefs[i].std)
+			init_keyword(parser_stream, &typedefs[i], NS_TYPEDEF);
+	}
+	for (i = 0; i < ARRAY_SIZE(keywords); i++) {
+		if (keywords[i].std && standard >= keywords[i].std)
+			init_keyword(parser_stream, &keywords[i], NS_KEYWORD);
+	}
+	if (standard >= STANDARD_C23) {
+		static_assert_ident.reserved = 1;
+		alignof_ident.reserved = 1;
+	}
+}
 
 static struct token *skip_to(struct token *token, int op)
 {
@@ -1513,6 +1543,7 @@ static struct token *alignas_specifier(struct token *token, struct symbol *sym, 
 {
 	int alignment = 0;
 
+	ctx->has_alignas = 1;
 	if (!match_op(token, '(')) {
 		sparse_error(token->pos, "expected '(' after _Alignas");
 		return token;
@@ -1986,6 +2017,9 @@ static struct token *handle_bitfield(struct token *token, struct decl_state *ctx
 	}
 
 	bitfield = alloc_indirect_symbol(token->pos, ctype, SYM_BITFIELD);
+	if (ctx->has_alignas)
+		sparse_error(token->pos, "alignment specified for bitfield '%s'",
+			show_ident(*ctx->ident));
 	token = conditional_expression(token->next, &expr);
 	width = const_expression_value(expr);
 	bitfield->bit_size = width;
@@ -2042,6 +2076,11 @@ static struct token *declaration_list(struct token *token, struct symbol_list **
 		decl->ctype.modifiers |= mod;
 		decl->cleanup = ctx.cleanup;
 		decl->endpos = token->pos;
+		if (decl->ctype.modifiers & MOD_TLS)
+			sparse_error(
+				decl->pos,
+				"struct or union member '%s' cannot be thread-local",
+				show_ident(decl->ident));
 		add_symbol(list, decl);
 		if (!match_op(token, ','))
 			break;
@@ -2054,7 +2093,9 @@ static struct token *declaration_list(struct token *token, struct symbol_list **
 static struct token *struct_declaration_list(struct token *token, struct symbol_list **list)
 {
 	while (!match_op(token, '}')) {
-		if (match_ident(token, &_Static_assert_ident)) {
+		if (match_ident(token, &_Static_assert_ident) ||
+		    (standard >= STANDARD_C23 &&
+		     match_ident(token, &static_assert_ident))) {
 			token = parse_static_assert(token, NULL);
 			continue;
 		}
@@ -2082,6 +2123,14 @@ static struct token *parameter_declaration(struct token *token, struct symbol *s
 	sym->ctype.modifiers |= decl_modifiers(&ctx);
 	sym->endpos = token->pos;
 	sym->forced_arg = ctx.forced;
+	if (ctx.has_alignas)
+		sparse_error(sym->pos,
+			     "alignment specified for parameter '%s'",
+			     show_ident(sym->ident));
+	if (sym->ctype.modifiers & MOD_TLS)
+		sparse_error(sym->pos,
+			     "parameter '%s' cannot be thread-local",
+			     show_ident(sym->ident));
 	return token;
 }
 
@@ -2092,6 +2141,8 @@ struct token *typename(struct token *token, struct symbol **p, int *forced)
 	struct symbol *sym = alloc_symbol(token->pos, SYM_NODE);
 	*p = sym;
 	token = declaration_specifiers(token, &ctx);
+	if (ctx.has_alignas)
+		sparse_error(sym->pos, "alignment specified for type name");
 	token = declarator(token, &ctx);
 	apply_modifiers(token->pos, &ctx);
 	sym->ctype = ctx.ctype;
@@ -2654,7 +2705,9 @@ static struct token * statement_list(struct token *token, struct statement_list 
 			break;
 		if (match_op(token, '}'))
 			break;
-		if (match_ident(token, &_Static_assert_ident)) {
+		if (match_ident(token, &_Static_assert_ident) ||
+		    (standard >= STANDARD_C23 &&
+		     match_ident(token, &static_assert_ident))) {
 			token = parse_static_assert(token, NULL);
 			continue;
 		}
@@ -3104,6 +3157,16 @@ struct token *external_declaration(struct token *token, struct symbol_list **lis
 		decl->ctype.modifiers |= ctx.f_modifiers;
 
 		/* K&R argument declaration? */
+		if (lookup_type(token) || match_op(token, '{')) {
+			if (ctx.has_alignas)
+				sparse_error(decl->pos,
+					     "alignment specified for function '%s'",
+					     show_ident(decl->ident));
+			if (decl->ctype.modifiers & MOD_TLS)
+				sparse_error(decl->pos,
+					     "function '%s' cannot be thread-local",
+					     show_ident(decl->ident));
+		}
 		if (lookup_type(token))
 			return parse_k_r_arguments(token, decl, list);
 		if (match_op(token, '{'))
@@ -3165,6 +3228,35 @@ struct token *external_declaration(struct token *token, struct symbol_list **lis
 				sparse_error(decl->pos, "__auto_type %s", msg);
 				decl->ctype.base_type = &bad_ctype;
 			}
+		}
+
+		if (ctx.has_alignas) {
+			if (is_typedef)
+				sparse_error(decl->pos,
+					     "alignment specified for typedef '%s'",
+					     show_ident(decl->ident));
+			else if (decl->ctype.base_type &&
+				 decl->ctype.base_type->type == SYM_FN)
+				sparse_error(decl->pos,
+					     "alignment specified for function '%s'",
+					     show_ident(decl->ident));
+			else if (decl->ctype.modifiers & MOD_REGISTER)
+				sparse_error(decl->pos,
+					     "alignment specified for 'register' object '%s'",
+					     show_ident(decl->ident));
+		}
+
+		if (!is_typedef && (decl->ctype.modifiers & MOD_TLS)) {
+			if (decl->ctype.base_type &&
+			    decl->ctype.base_type->type == SYM_FN)
+				sparse_error(decl->pos,
+					     "function '%s' cannot be thread-local",
+					     show_ident(decl->ident));
+			else if (!(decl->ctype.modifiers &
+				   (MOD_TOPLEVEL | MOD_STATIC | MOD_EXTERN)))
+				sparse_error(decl->pos,
+					     "thread-local variable '%s' at block scope must be 'static' or 'extern'",
+					     show_ident(decl->ident));
 		}
 
 		if (!match_op(token, ','))
