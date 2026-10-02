@@ -265,6 +265,12 @@ const char *show_token(const struct token *token)
 		sprintf(buffer, "<argcnt>");
 		return buffer;
 
+	case TOKEN_VA_OPT:
+		return "__VA_OPT__(...)";
+
+	case TOKEN_STR_VA_OPT:
+		return "#__VA_OPT__(...)";
+
 	case TOKEN_GNU_KLUDGE:
 		return ",";
 
@@ -321,6 +327,10 @@ const char *quote_token(const struct token *token)
 	case TOKEN_UTF8_STRING:
 		return quote_char(token->string->data,
 				  token->string->length - 1, "u8", '"');
+	case TOKEN_VA_OPT:
+		return "__VA_OPT__(...)";
+	case TOKEN_STR_VA_OPT:
+		return "#__VA_OPT__(...)";
 	case TOKEN_GNU_KLUDGE:
 		return ",";
 	default:

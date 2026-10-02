@@ -110,6 +110,8 @@ enum token_type {
 	TOKEN_QUOTED_ARGUMENT,
 	TOKEN_CONCAT,
 	TOKEN_GNU_KLUDGE,
+	TOKEN_VA_OPT,
+	TOKEN_STR_VA_OPT,
 	TOKEN_UNTAINT,
 	TOKEN_ARG_COUNT,
 	TOKEN_IF,
@@ -200,6 +202,7 @@ struct token {
 		int argnum;
 		struct argcount count;
 		char embedded[4];
+		struct token *target;
 	};
 };
 
