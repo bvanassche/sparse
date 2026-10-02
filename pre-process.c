@@ -1713,37 +1713,96 @@ static int handle_if(struct stream *stream, struct token **line, struct token *t
 	return preprocessor_if(stream, token, value);
 }
 
-static int handle_elif(struct stream * stream, struct token **line, struct token *token)
+static int do_handle_elif(struct stream *stream, struct token *token,
+			  int (*eval)(struct token *),
+			  bool (*check)(struct token *))
 {
 	struct token *top_if = stream->top_if;
 	end_group(stream);
 
 	if (!top_if) {
 		nesting_error(stream);
-		sparse_error(token->pos, "unmatched #elif within stream");
+		sparse_error(token->pos, "unmatched #%s within stream",
+			     show_token(token));
 		return 1;
 	}
 
 	if (token_type(top_if) == TOKEN_ELSE) {
 		nesting_error(stream);
-		sparse_error(token->pos, "#elif after #else");
+		sparse_error(token->pos, "#%s after #else", show_token(token));
 		if (!false_nesting)
 			false_nesting = 1;
 		return 1;
 	}
 
 	dirty_stream(stream);
-	if (token_type(top_if) != TOKEN_IF)
+	if (token_type(top_if) != TOKEN_IF) {
+		if (false_nesting <= 1 && check)
+			check(token);
 		return 1;
+	}
 	if (false_nesting) {
 		false_nesting = 0;
-		if (!expression_value(&token->next))
+		if (!eval(token))
 			false_nesting = 1;
 	} else {
+		if (check)
+			check(token);
 		false_nesting = 1;
 		token_type(top_if) = TOKEN_SKIP_GROUPS;
 	}
 	return 1;
+}
+
+static int eval_elif(struct token *token)
+{
+	return expression_value(&token->next);
+}
+
+static bool check_elifdef(struct token *token)
+{
+	struct token *next = token->next;
+
+	if (standard < STANDARD_C23 && Wpedantic)
+		warning(token->pos, "ISO C does not support #%s before C23",
+			show_token(token));
+	if (token_type(next) != TOKEN_IDENT) {
+		sparse_error(token->pos, "expected preprocessor identifier");
+		return false;
+	}
+	if (!eof_token(next->next))
+		warning(next->next->pos,
+			"extra tokens at end of #%s directive",
+			show_token(token));
+	return true;
+}
+
+static int eval_elifdef(struct token *token)
+{
+	return check_elifdef(token) && token_defined(token->next);
+}
+
+static int eval_elifndef(struct token *token)
+{
+	return check_elifdef(token) && !token_defined(token->next);
+}
+
+static int handle_elif(struct stream *stream, struct token **line,
+		       struct token *token)
+{
+	return do_handle_elif(stream, token, eval_elif, NULL);
+}
+
+static int handle_elifdef(struct stream *stream, struct token **line,
+			  struct token *token)
+{
+	return do_handle_elif(stream, token, eval_elifdef, check_elifdef);
+}
+
+static int handle_elifndef(struct stream *stream, struct token **line,
+			   struct token *token)
+{
+	return do_handle_elif(stream, token, eval_elifndef, check_elifdef);
 }
 
 static int handle_else(struct stream *stream, struct token **line, struct token *token)
@@ -2163,6 +2222,8 @@ static void init_preprocessor(void)
 		{ "endif",	handle_endif },
 		{ "if",		handle_if },
 		{ "elif",	handle_elif },
+		{ "elifdef",	handle_elifdef },
+		{ "elifndef",	handle_elifndef },
 	};
 	static struct {
 		const char *name;
