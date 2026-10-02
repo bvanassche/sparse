@@ -631,12 +631,16 @@ int inline_function(struct expression *expr, struct symbol *sym)
 	FOR_EACH_PTR(expr->args, arg) {
 		struct symbol *a = alloc_symbol(arg->pos, SYM_NODE);
 
-		if (name) {
+		if (name && name->ident) {
 			*a = *name;
 			a->bb_target = NULL;
 			a->pseudo = NULL;
 			set_replace(name, a);
 			add_symbol(&fn_symbol_list, a);
+			a->initializer = arg;
+			add_symbol(&arg_decl, a);
+		} else if (name) {
+			*a = *name;
 			a->initializer = arg;
 			add_symbol(&arg_decl, a);
 		} else {
