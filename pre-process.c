@@ -1937,6 +1937,16 @@ static int expression_value(struct token **where)
 				continue;
 			if (token_type(p) != TOKEN_IDENT)
 				break;
+			if (standard >= STANDARD_C23 &&
+			    p->ident == &true_ident) {
+				replace_with_bool(p, 1);
+				break;
+			}
+			if (standard >= STANDARD_C23 &&
+			    p->ident == &false_ident) {
+				replace_with_bool(p, 0);
+				break;
+			}
 			token_type(p) = TOKEN_ZERO_IDENT;
 			break;
 		case 1:

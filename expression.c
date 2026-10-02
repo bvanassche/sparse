@@ -466,8 +466,21 @@ struct token *primary_expression(struct token *token, struct expression **tree)
 	}
 
 	case TOKEN_IDENT: {
-		struct symbol *sym = lookup_symbol(token->ident, NS_SYMBOL | NS_TYPEDEF);
+		struct symbol *sym;
 		struct token *next = token->next;
+
+		if (standard >= STANDARD_C23 &&
+		    (token->ident == &true_ident ||
+		     token->ident == &false_ident)) {
+			expr = alloc_expression(token->pos, EXPR_VALUE);
+			expr->flags = CEF_SET_INT;
+			expr->ctype = &bool_ctype;
+			expr->value = (token->ident == &true_ident);
+			token = next;
+			break;
+		}
+
+		sym = lookup_symbol(token->ident, NS_SYMBOL | NS_TYPEDEF);
 
 		if (!sym) {
 			sym = handle_func(token);

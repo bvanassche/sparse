@@ -46,8 +46,11 @@ IDENT(_Thread_local);
 /* C23 keywords */
 IDENT(alignas);
 IDENT(alignof);
+IDENT(bool);
+IDENT(false);
 IDENT(static_assert);
 IDENT(thread_local);
+IDENT(true);
 
 /* Special case for L'\t' */
 IDENT(L);
