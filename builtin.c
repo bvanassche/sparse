@@ -638,6 +638,81 @@ static struct symbol_op object_size_op = {
 	.expand = expand_object_size,
 };
 
+static int args_va_start(struct expression *expr)
+{
+	struct symbol *sym = expr->fn->ctype;
+	bool is_c23 = !strcmp(show_ident(sym->ident), "__builtin_c23_va_start");
+	int n = expression_list_size(expr->args);
+	struct expression *arg;
+	int i = 0;
+
+	if (n < 1 || (!is_c23 && standard < STANDARD_C23 && n < 2)) {
+		expression_error(expr, "not enough arguments for %s",
+				 show_ident(sym->ident));
+		return 0;
+	}
+	if (!is_c23 && n > 2) {
+		expression_error(expr, "too many arguments for %s",
+				 show_ident(sym->ident));
+		return 0;
+	}
+	FOR_EACH_PTR(expr->args, arg) {
+		if (i == 1 && !is_c23) {
+			if (!evaluate_expression(arg))
+				return 0;
+		}
+		i++;
+	} END_FOR_EACH_PTR(arg);
+	return 1;
+}
+
+static int evaluate_va_start(struct expression *expr)
+{
+	struct expression *ap = first_expression(expr->args);
+	struct symbol *fntype = current_fn ? current_fn->ctype.base_type : NULL;
+	struct expression *assign, *rhs;
+
+	if (current_fn && current_fn->type == SYM_FN)
+		fntype = current_fn;
+	if (!fntype || !fntype->variadic) {
+		expression_error(expr, "'va_start' used in function with fixed args");
+		return 1;
+	}
+
+	if (!evaluate_expression(ap) || !valid_type(ap->ctype))
+		return 1;
+	{
+		struct symbol *atype = ap->ctype;
+		while (atype && atype->type == SYM_NODE)
+			atype = atype->ctype.base_type;
+		if (atype != &ptr_ctype) {
+			expression_error(expr, "incorrect type in 'va_start'");
+			return 1;
+		}
+	}
+
+	rhs = alloc_expression(expr->pos, EXPR_VALUE);
+	rhs->ctype = &ptr_ctype;
+	rhs->value = 0;
+
+	assign = alloc_expression(expr->pos, EXPR_ASSIGNMENT);
+	assign->op = '=';
+	assign->left = ap;
+	assign->right = rhs;
+	evaluate_expression(assign);
+
+	expr->type = EXPR_CAST;
+	expr->cast_type = &void_ctype;
+	expr->cast_expression = assign;
+	expr->ctype = &void_ctype;
+	return 1;
+}
+
+static struct symbol_op va_start_op = {
+	.args = args_va_start,
+	.evaluate = evaluate_va_start,
+};
+
 static int evaluate_strlen(struct expression *expr)
 {
 	struct expression *arg = first_expression(expr->args);
@@ -876,7 +951,9 @@ static const struct builtin_fn builtins_common[] = {
 	{ "__builtin_usub_overflow", &bool_ctype, 0, { &uint_ctype, &uint_ctype, &uint_ptr_ctype }},
 	{ "__builtin_usubl_overflow", &bool_ctype, 0, { &ulong_ctype, &ulong_ctype, &ulong_ptr_ctype }},
 	{ "__builtin_usubll_overflow", &bool_ctype, 0, { &ullong_ctype, &ullong_ctype, &ullong_ptr_ctype }},
+	{ "__builtin_c23_va_start", &void_ctype, 1, .op = &va_start_op },
 	{ "__builtin_va_arg_pack_len", size_t_ctype, 0 },
+	{ "__builtin_va_start", &void_ctype, 1, .op = &va_start_op },
 	{ "__builtin_vprintf", &int_ctype, 0, { &const_string_ctype, va_list_ctype }},
 	{ "__builtin_vsnprintf", &int_ctype, 0, { &string_ctype, size_t_ctype, &const_string_ctype, va_list_ctype }},
 	{ "__builtin_vsprintf", &int_ctype, 0, { &string_ctype, &const_string_ctype, va_list_ctype }},
