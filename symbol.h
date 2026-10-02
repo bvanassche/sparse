@@ -198,6 +198,7 @@ struct symbol {
 				packed : 1, transparent_union : 1,
 				fixed_type : 1;
 			unsigned int has_alignas : 1;
+			unsigned int kr_args : 1;
 			unsigned int underspecified : 1;
 			unsigned int c23_auto : 1;
 			int		rank:3;	// arithmetic's rank
