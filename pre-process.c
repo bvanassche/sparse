@@ -50,6 +50,7 @@ static int false_nesting = 0;
 static int counter_macro = 0;		// __COUNTER__ expansion
 static int include_level = 0;
 static int expanding = 0;
+static int in_cond_expr = 0;
 
 #define INCLUDEPATHS 300
 const char *includepath[INCLUDEPATHS+1] = {
@@ -762,6 +763,32 @@ static struct token **substitute(struct token **list, const struct token *body, 
 	return list;
 }
 
+static bool parse_has_include(struct token **list, int how);
+
+static void reject_outside_directive(struct token *token)
+{
+	struct token *next;
+
+	sparse_error(token->pos, "'%s' used outside of preprocessing directive",
+		     show_token(token));
+	next = scan_next(&token->next);
+	if (match_op(next, '(')) {
+		int depth = 1;
+
+		next = next->next;
+		while (!eof_token(next) && depth > 0) {
+			if (match_op(next, '('))
+				depth++;
+			else if (match_op(next, ')'))
+				depth--;
+			next = next->next;
+		}
+	}
+	token_type(token) = TOKEN_NUMBER;
+	token->number = "0";
+	token->next = next;
+}
+
 static int expand(struct token **list, struct symbol *sym)
 {
 	struct token *last;
@@ -777,6 +804,23 @@ static int expand(struct token **list, struct symbol *sym)
 		return 1;
 	}
 
+	if (expanding == &__has_include_ident ||
+	    expanding == &__has_include_next_ident) {
+		bool ok;
+
+		if (!in_cond_expr) {
+			reject_outside_directive(token);
+			return 0;
+		}
+		if (expanding == &__has_include_ident)
+			ok = parse_has_include(list, 0);
+		else
+			ok = parse_has_include(list, 1);
+		if (!ok)
+			replace_with_bool(token, 0);
+		return 0;
+	}
+
 	if (sym->arglist) {
 		if (!match_op(scan_next(&token->next), '('))
 			return 1;
@@ -787,6 +831,9 @@ static int expand(struct token **list, struct symbol *sym)
 
 	if (sym->expand)
 		return sym->expand(token, args) ? 0 : 1;
+
+	if (!expansion)
+		return 1;
 
 	expanding->tainted = 1;
 
@@ -964,6 +1011,224 @@ static int do_include_path(const char **pptr, struct token **list, struct token 
 		return 1;
 	}
 	return 0;
+}
+
+static int test_include(const char *path, const char *filename)
+{
+	int fd;
+	struct stat st;
+	int plen = strlen(path);
+	int flen = strlen(filename);
+	char fullname[PATH_MAX];
+
+	if (plen + flen + 2 > sizeof(fullname))
+		return 0;
+	memcpy(fullname, path, plen);
+	if (plen && path[plen - 1] != '/') {
+		fullname[plen] = '/';
+		plen++;
+	}
+	memcpy(fullname + plen, filename, flen + 1);
+	if (already_tokenized(fullname))
+		return 1;
+	fd = open(fullname, O_RDONLY);
+	if (fd >= 0) {
+		if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode)) {
+			close(fd);
+			return 1;
+		}
+		close(fd);
+	}
+	return 0;
+}
+
+static int check_include(const char **pptr, const char *filename)
+{
+	const char *path;
+	while ((path = *pptr++) != NULL) {
+		if (test_include(path, filename))
+			return 1;
+	}
+	return 0;
+}
+
+static int check_has_include(struct stream *stream, const char *filename,
+			     int expect, int how)
+{
+	const char **path;
+
+	/* Absolute path? */
+	if (filename[0] == '/')
+		return test_include("", filename);
+
+	switch (how) {
+	case 1:
+		path = stream->next_path;
+		break;
+	default:
+		set_stream_include_path(stream);
+		path = expect ? angle_includepath : quote_includepath;
+		break;
+	}
+	if (!path)
+		return 0;
+	return check_include(path, filename);
+}
+
+static struct token *skip_balanced_parens(struct token *lparen)
+{
+	struct token *t;
+	int depth = 1;
+
+	if (!match_op(lparen, '('))
+		return lparen;
+	t = lparen->next;
+	while (!eof_token(t) && depth > 0) {
+		if (match_op(t, '('))
+			depth++;
+		else if (match_op(t, ')'))
+			depth--;
+		t = t->next;
+	}
+	return t;
+}
+
+static bool collect_angle_filename(struct token **next_p, char *buf,
+				   size_t size, struct position pos)
+{
+	struct token *t = *next_p;
+	char *ptr = buf;
+
+	while (!eof_token(t) && !match_op(t, '>')) {
+		const char *s = (token_type(t) == TOKEN_STRING) ?
+					t->string->data :
+					show_token(t);
+		size_t len = strlen(s);
+		size_t rem = size - (size_t)(ptr - buf);
+
+		if (len >= rem) {
+			sparse_error(t->pos, "header name too long");
+			return false;
+		}
+		memcpy(ptr, s, len);
+		ptr += len;
+		t = t->next;
+	}
+	*ptr = '\0';
+	if (!match_op(t, '>')) {
+		sparse_error(pos, "expected '>'");
+		return false;
+	}
+	if (ptr == buf) {
+		sparse_error(pos, "empty filename");
+		return false;
+	}
+	*next_p = t->next;
+	return true;
+}
+
+static bool extract_string_filename(struct token **next_p, char *buf,
+				    size_t size)
+{
+	struct token *t = *next_p;
+	const char *s = t->string->data;
+	size_t len = strlen(s);
+
+	if (!len) {
+		sparse_error(t->pos, "empty filename");
+		return false;
+	}
+	if (len >= size) {
+		sparse_error(t->pos, "header name too long");
+		return false;
+	}
+	memcpy(buf, s, len + 1);
+	*next_p = t->next;
+	return true;
+}
+
+static bool parse_has_include(struct token **list, int how)
+{
+	struct token *token = *list;
+	struct token *lparen = scan_next(&token->next);
+	struct token *next;
+	struct stream *stream = input_streams + token->pos.stream;
+	char filename[PATH_MAX];
+	int expect = 0;
+	int val = 0;
+
+	if (!match_op(lparen, '(')) {
+		sparse_error(token->pos, "expected '(' after %s",
+			     show_token(token));
+		return false;
+	}
+	next = scan_next(&lparen->next);
+	if (match_op(next, '<')) {
+		expect = '>';
+		next = next->next;
+		if (!collect_angle_filename(&next, filename, sizeof(filename),
+					    token->pos))
+			goto err;
+	} else if (token_type(next) == TOKEN_STRING) {
+		if (!extract_string_filename(&next, filename, sizeof(filename)))
+			goto err;
+	} else {
+		struct token **p = &lparen->next;
+		struct token *rparen = scan_next(p);
+		int depth = 1;
+
+		while (!eof_token(rparen)) {
+			if (match_op(rparen, '('))
+				depth++;
+			else if (match_op(rparen, ')') && !--depth)
+				break;
+			p = &rparen->next;
+			rparen = scan_next(p);
+		}
+		if (!match_op(rparen, ')')) {
+			sparse_error(rparen->pos, "expected ')'");
+			token->next = rparen;
+			return false;
+		}
+		*p = &eof_token_entry;
+		expand_list(&lparen->next);
+		p = &lparen->next;
+		while (!eof_token(*p))
+			p = &(*p)->next;
+		*p = rparen;
+		next = lparen->next;
+		if (match_op(next, '<')) {
+			expect = '>';
+			next = next->next;
+			if (!collect_angle_filename(&next, filename,
+						    sizeof(filename),
+						    token->pos))
+				goto err;
+		} else if (token_type(next) == TOKEN_STRING) {
+			if (!extract_string_filename(&next, filename,
+						     sizeof(filename)))
+				goto err;
+		} else {
+			sparse_error(next->pos,
+				     "expected \"FILENAME\" or <FILENAME>");
+			goto err;
+		}
+	}
+	next = scan_next(&next);
+	if (!match_op(next, ')')) {
+		sparse_error(next->pos, "expected ')'");
+		goto err;
+	}
+	next = next->next;
+
+	val = check_has_include(stream, filename, expect, how);
+	replace_with_bool(token, val);
+	token->next = next;
+	return true;
+
+err:
+	token->next = skip_balanced_parens(lparen);
+	return false;
 }
 
 static int free_preprocessor_line(struct token *token)
@@ -1645,6 +1910,7 @@ static int expression_value(struct token **where)
 	long long value;
 	int state = 0;
 
+	in_cond_expr++;
 	while (!eof_token(p = scan_next(list))) {
 		switch (state) {
 		case 0:
@@ -1653,6 +1919,18 @@ static int expression_value(struct token **where)
 			if (p->ident == &defined_ident) {
 				state = 1;
 				beginning = list;
+				break;
+			}
+			if (p->ident == &__has_include_ident) {
+				if (parse_has_include(list, 0))
+					continue;
+				replace_with_bool(p, 0);
+				break;
+			}
+			if (p->ident == &__has_include_next_ident) {
+				if (parse_has_include(list, 1))
+					continue;
+				replace_with_bool(p, 0);
 				break;
 			}
 			if (!expand_one_symbol(list))
@@ -1700,6 +1978,7 @@ static int expression_value(struct token **where)
 	if (!eof_token(p))
 		sparse_error(p->pos, "garbage at end: %s", show_token_sequence(p, 0));
 	value = get_expression_value(expr);
+	in_cond_expr--;
 	return value != 0;
 }
 
@@ -2230,17 +2509,19 @@ static void init_preprocessor(void)
 		void (*expand_simple)(struct token *);
 		bool (*expand)(struct token *, struct arg *args);
 	} dynamic[] = {
-		{ "__LINE__",		expand_line },
-		{ "__FILE__",		expand_file },
-		{ "__BASE_FILE__",	expand_basefile },
-		{ "__DATE__",		expand_date },
-		{ "__TIME__",		expand_time },
-		{ "__COUNTER__",	expand_counter },
-		{ "__INCLUDE_LEVEL__",	expand_include_level },
-		{ "__has_attribute",	NULL, expand_has_attribute },
-		{ "__has_builtin",	NULL, expand_has_builtin },
-		{ "__has_extension",	NULL, expand_has_extension },
-		{ "__has_feature",	NULL, expand_has_feature },
+		{ "__LINE__", expand_line },
+		{ "__FILE__", expand_file },
+		{ "__BASE_FILE__", expand_basefile },
+		{ "__DATE__", expand_date },
+		{ "__TIME__", expand_time },
+		{ "__COUNTER__", expand_counter },
+		{ "__INCLUDE_LEVEL__", expand_include_level },
+		{ "__has_attribute", NULL, expand_has_attribute },
+		{ "__has_builtin", NULL, expand_has_builtin },
+		{ "__has_extension", NULL, expand_has_extension },
+		{ "__has_feature", NULL, expand_has_feature },
+		{ "__has_include", NULL, NULL },
+		{ "__has_include_next", NULL, NULL },
 	};
 
 	for (i = 0; i < ARRAY_SIZE(normal); i++) {

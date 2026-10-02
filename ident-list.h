@@ -68,6 +68,8 @@ __IDENT(__VA_ARGS___ident, "__VA_ARGS__", 0);
 __IDENT(__func___ident, "__func__", 0);
 __IDENT(__FUNCTION___ident, "__FUNCTION__", 0);
 __IDENT(__PRETTY_FUNCTION___ident, "__PRETTY_FUNCTION__", 0);
+__IDENT(__has_include_ident, "__has_include", 0);
+__IDENT(__has_include_next_ident, "__has_include_next", 0);
 
 /* Sparse commands */
 IDENT_RESERVED(__context__);
