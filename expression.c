@@ -258,6 +258,157 @@ static unsigned long long parse_num(const char *nptr, char **end)
 	return strtoull(nptr, end, 0);
 }
 
+static int is_digit_for_base(int c, int base)
+{
+	if (base == 2)
+		return c == '0' || c == '1';
+	if (base == 8)
+		return c >= '0' && c <= '7';
+	if (base == 16)
+		return isxdigit((unsigned char)c);
+	return isdigit((unsigned char)c);
+}
+
+static int validate_digit_separators(struct expression *expr, const char *str)
+{
+	enum {
+		NUM_INT,
+		NUM_FRAC,
+		NUM_EXP_SIGN,
+		NUM_EXP,
+		NUM_SUFFIX,
+	} state = NUM_INT;
+	int is_hex = (str[0] == '0' && (str[1] == 'x' || str[1] == 'X'));
+	int is_bin = (str[0] == '0' && (str[1] == 'b' || str[1] == 'B'));
+	int is_oct = (str[0] == '0' && !is_hex && !is_bin &&
+		      strchr(str, '.') == NULL && strchr(str, 'e') == NULL &&
+		      strchr(str, 'E') == NULL);
+	int base = is_hex ? 16 : is_bin ? 2 : is_oct ? 8 : 10;
+	int in_digits = 0;
+	int i = (is_hex || is_bin) ? 2 : 0;
+
+	for (; str[i]; i++) {
+		char c = str[i];
+
+		if (c == '\'') {
+			char prev = i > 0 ? str[i - 1] : 0;
+			char next = str[i + 1];
+
+			if (prev == '\'' || next == '\'') {
+				sparse_error(expr->pos,
+					     "adjacent digit separators");
+				return 0;
+			}
+			if (i == 2 && (is_hex || is_bin)) {
+				sparse_error(
+					expr->pos,
+					"digit separator after base indicator");
+				return 0;
+			}
+			if (prev == '.' || next == '.') {
+				sparse_error(
+					expr->pos,
+					"digit separator adjacent to decimal point");
+				return 0;
+			}
+			if (state == NUM_EXP_SIGN ||
+			    (state != NUM_SUFFIX &&
+			     ((is_hex && (next == 'p' || next == 'P')) ||
+			      (!is_hex && (next == 'e' || next == 'E')))) ||
+			    (!in_digits && state == NUM_EXP)) {
+				sparse_error(
+					expr->pos,
+					"digit separator adjacent to exponent");
+				return 0;
+			}
+			if (state == NUM_SUFFIX || !in_digits ||
+			    !is_digit_for_base(next, base)) {
+				sparse_error(
+					expr->pos,
+					"digit separator outside digit sequence");
+				return 0;
+			}
+			in_digits = 0;
+			continue;
+		}
+
+		switch (state) {
+		case NUM_INT:
+			if (is_digit_for_base(c, base)) {
+				in_digits = 1;
+			} else if (c == '.' && (base == 10 || base == 16)) {
+				state = NUM_FRAC;
+				in_digits = 0;
+			} else if ((base == 10 && (c == 'e' || c == 'E')) ||
+				   (base == 16 && (c == 'p' || c == 'P'))) {
+				state = NUM_EXP_SIGN;
+				base = 10;
+				in_digits = 0;
+			} else {
+				state = NUM_SUFFIX;
+				in_digits = 0;
+			}
+			break;
+		case NUM_FRAC:
+			if (is_digit_for_base(c, base)) {
+				in_digits = 1;
+			} else if ((base == 10 && (c == 'e' || c == 'E')) ||
+				   (base == 16 && (c == 'p' || c == 'P'))) {
+				state = NUM_EXP_SIGN;
+				base = 10;
+				in_digits = 0;
+			} else {
+				state = NUM_SUFFIX;
+				in_digits = 0;
+			}
+			break;
+		case NUM_EXP_SIGN:
+			state = NUM_EXP;
+			if (c == '+' || c == '-') {
+				in_digits = 0;
+			} else if (isdigit((unsigned char)c)) {
+				in_digits = 1;
+			} else {
+				state = NUM_SUFFIX;
+				in_digits = 0;
+			}
+			break;
+		case NUM_EXP:
+			if (isdigit((unsigned char)c)) {
+				in_digits = 1;
+			} else {
+				state = NUM_SUFFIX;
+				in_digits = 0;
+			}
+			break;
+		case NUM_SUFFIX:
+			break;
+		}
+	}
+	return 1;
+}
+
+static const char *strip_digit_separators(const char *str)
+{
+	size_t len;
+	char *buf, *dst;
+
+	if (!strchr(str, '\''))
+		return str;
+
+	len = strlen(str);
+	buf = __alloc_bytes(len + 1);
+	dst = buf;
+
+	while (*str) {
+		if (*str != '\'')
+			*dst++ = *str;
+		str++;
+	}
+	*dst = '\0';
+	return buf;
+}
+
 static void get_number_value(struct expression *expr, struct token *token)
 {
 	const char *str = token->number;
@@ -267,6 +418,19 @@ static void get_number_value(struct expression *expr, struct token *token)
 	int overflow = 0, do_warn = 0;
 	int try_unsigned = 1;
 	int bits;
+
+	if (strchr(str, '\'')) {
+		if (!validate_digit_separators(expr, str)) {
+			expr->type = EXPR_VALUE;
+			expr->flags = CEF_SET_ICE;
+			expr->ctype = &bad_ctype;
+			return;
+		}
+		if (standard < STANDARD_C23 && Wpedantic)
+			warning(expr->pos,
+				"ISO C does not support digit separators before C23");
+		str = strip_digit_separators(str);
+	}
 
 	errno = 0;
 	value = parse_num(str, &end);
@@ -385,6 +549,7 @@ Float:
 Enoint:
 	sparse_error(expr->pos, "constant %s is not a valid number", show_token(token));
 	expr->type = EXPR_VALUE;
+	expr->flags = CEF_SET_ICE;
 	expr->value = 0;
 	expr->ctype = &int_ctype;
 }
