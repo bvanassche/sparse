@@ -1,3 +1,6 @@
+static_assert(__has_c_attribute(maybe_unused) != 0);
+static_assert(__has_c_attribute(nodiscard) != 0);
+
 [[maybe_unused]] static int unused_var;
 
 [[nodiscard]] static int get_val(void)

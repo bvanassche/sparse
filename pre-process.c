@@ -2364,6 +2364,71 @@ static int handle_nondirective(struct stream *stream, struct token **line, struc
 	return 1;
 }
 
+static bool expand_has_c_attribute(struct token *token, struct arg *args)
+{
+	struct token *arg = args[0].expanded;
+	const char *name;
+	const char *val = "0";
+	char buf[4096];
+
+	if (token_type(arg) != TOKEN_IDENT) {
+		sparse_error(eof_token(arg) ? token->pos : arg->pos,
+			     "identifier expected");
+		return false;
+	}
+
+	if (match_op(arg->next, ':') && match_op(arg->next->next, ':')) {
+		struct token *attr = arg->next->next->next;
+		if (token_type(attr) != TOKEN_IDENT || !eof_token(attr->next)) {
+			sparse_error(eof_token(attr) ? token->pos : attr->pos,
+				     "identifier expected");
+			return false;
+		}
+		if (arg->ident == &gnu_ident || arg->ident == &__gnu___ident) {
+			struct symbol *sym = lookup_symbol(attr->ident, NS_KEYWORD);
+			if (sym && sym->op && sym->op->attribute)
+				val = "1";
+		}
+		token_type(token) = TOKEN_NUMBER;
+		token->number = val;
+		return true;
+	}
+
+	if (!eof_token(arg->next)) {
+		sparse_error(arg->next->pos, "expected ')'");
+		return false;
+	}
+
+	name = show_ident(arg->ident);
+	if (name[0] == '_' && name[1] == '_') {
+		size_t len = strlen(name);
+		if (len > 4 && name[len - 1] == '_' && name[len - 2] == '_') {
+			if (len - 4 < sizeof(buf)) {
+				memcpy(buf, name + 2, len - 4);
+				buf[len - 4] = '\0';
+				name = buf;
+			}
+		}
+	}
+
+	if (!strcmp(name, "deprecated"))
+		val = "201904L";
+	else if (!strcmp(name, "fallthrough"))
+		val = "201910L";
+	else if (!strcmp(name, "nodiscard"))
+		val = "202003L";
+	else if (!strcmp(name, "maybe_unused"))
+		val = "202106L";
+	else if (!strcmp(name, "noreturn") || !strcmp(name, "_Noreturn"))
+		val = "202202L";
+	else if (!strcmp(name, "reproducible") || !strcmp(name, "unsequenced"))
+		val = "202207L";
+
+	token_type(token) = TOKEN_NUMBER;
+	token->number = val;
+	return true;
+}
+
 static bool expand_has_attribute(struct token *token, struct arg *args)
 {
 	struct token *arg = args[0].expanded;
@@ -2528,6 +2593,7 @@ static void init_preprocessor(void)
 		{ "__INCLUDE_LEVEL__", expand_include_level },
 		{ "__has_attribute", NULL, expand_has_attribute },
 		{ "__has_builtin", NULL, expand_has_builtin },
+		{ "__has_c_attribute", NULL, expand_has_c_attribute },
 		{ "__has_extension", NULL, expand_has_extension },
 		{ "__has_feature", NULL, expand_has_feature },
 		{ "__has_include", NULL, NULL },
