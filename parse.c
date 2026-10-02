@@ -520,6 +520,7 @@ static struct init_keyword {
 	N("unsigned",		&unsigned_op),
 	N("__int128",		&int128_op),
 	N("_Bool",		&spec_op,	.type = &bool_ctype),
+	N("bool",		&spec_op,	.type = &bool_ctype, .std = STANDARD_C23),
 
 	/* Predeclared types */
 	N("__builtin_va_list",	&spec_op,	.type = &ptr_ctype),
@@ -655,6 +656,8 @@ void init_parser_finalize(void)
 	if (standard >= STANDARD_C23) {
 		static_assert_ident.reserved = 1;
 		alignof_ident.reserved = 1;
+		true_ident.reserved = 1;
+		false_ident.reserved = 1;
 	}
 }
 
