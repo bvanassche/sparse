@@ -57,7 +57,7 @@ static declarator_t
 	attribute_specifier, typeof_specifier, typeof_unqual_specifier,
 	storage_specifier, thread_specifier;
 static declarator_t generic_qualifier;
-static declarator_t autotype_specifier;
+static declarator_t autotype_specifier, auto_specifier;
 
 static struct token *parse_if_statement(struct token *token, struct statement *stmt);
 static struct token *parse_return_statement(struct token *token, struct statement *stmt);
@@ -143,7 +143,7 @@ static struct symbol_op alignas_op = {
 
 static struct symbol_op auto_op = {
 	.type = KW_MODIFIER,
-	.declarator = storage_specifier,
+	.declarator = auto_specifier,
 };
 
 static struct symbol_op register_op = {
@@ -472,7 +472,7 @@ static struct init_keyword {
 #define U(I, O,...)	N("__" I,O,##__VA_ARGS__),	\
 			N("__" I "__",O,##__VA_ARGS__)
 	/* Storage classes */
-	N("auto",		&auto_op,	.mods = MOD_AUTO),
+	N("auto",		&auto_op),
 	N("register",		&register_op,	.mods = MOD_REGISTER),
 	N("static",		&static_op,	.mods = MOD_STATIC),
 	N("extern",		&extern_op,	.mods = MOD_EXTERN),
@@ -1202,6 +1202,15 @@ static struct token *autotype_specifier(struct token *token, struct symbol *sym,
 	return token;
 }
 
+static struct token *auto_specifier(struct token *token, struct symbol *sym,
+				    struct decl_state *ctx)
+{
+	if (ctx->has_auto)
+		sparse_error(token->pos, "duplicate auto");
+	ctx->has_auto = 1;
+	return token;
+}
+
 static struct token *ignore_attribute(struct token *token, struct symbol *attr, struct decl_state *ctx)
 {
 	struct expression *expr = NULL;
@@ -1732,6 +1741,23 @@ static struct token *declaration_specifiers(struct token *token, struct decl_sta
 		}
 	}
 
+	if (ctx->has_auto) {
+		if (seen & (Set_S | Set_Any)) {
+			if (ctx->storage_class)
+				sparse_error(token->pos,
+					     "multiple storage classes");
+			else
+				ctx->storage_class = MOD_AUTO;
+		} else {
+			if (standard < STANDARD_C23 && Wpedantic)
+				warning(token->pos,
+					"'auto' type inference is a C23 feature");
+			ctx->ctype.base_type = &autotype_ctype;
+			ctx->autotype = 1;
+			seen |= Set_S;
+		}
+	}
+
 	if (!(seen & Set_S)) {	/* not set explicitly? */
 		struct symbol *base = &incomplete_ctype;
 		if (seen & Set_Any)
@@ -2085,6 +2111,14 @@ static struct token *declaration_list(struct token *token, struct symbol_list **
 		decl->ctype.modifiers |= mod;
 		decl->cleanup = ctx.cleanup;
 		decl->endpos = token->pos;
+		if (ctx.has_auto) {
+			sparse_error(
+				decl->pos,
+				"struct or union member '%s' cannot be declared auto",
+				show_ident(decl->ident));
+			if (ctx.autotype)
+				decl->ctype.base_type = &bad_ctype;
+		}
 		if (decl->ctype.modifiers & MOD_TLS)
 			sparse_error(
 				decl->pos,
@@ -2136,6 +2170,14 @@ static struct token *parameter_declaration(struct token *token, struct symbol *s
 		sparse_error(sym->pos,
 			     "alignment specified for parameter '%s'",
 			     show_ident(sym->ident));
+	if (ctx.has_auto || ctx.autotype) {
+		sparse_error(sym->pos,
+			     "parameter '%s' cannot be declared %s",
+			     show_ident(sym->ident),
+			     ctx.has_auto ? "auto" : "__auto_type");
+		if (ctx.autotype)
+			sym->ctype.base_type = &bad_ctype;
+	}
 	if (sym->ctype.modifiers & MOD_TLS)
 		sparse_error(sym->pos,
 			     "parameter '%s' cannot be thread-local",
@@ -2152,6 +2194,11 @@ struct token *typename(struct token *token, struct symbol **p, int *forced)
 	token = declaration_specifiers(token, &ctx);
 	if (ctx.has_alignas)
 		sparse_error(sym->pos, "alignment specified for type name");
+	if (ctx.autotype) {
+		sparse_error(sym->pos, "'%s' in type name",
+			     ctx.has_auto ? "auto" : "__auto_type");
+		ctx.ctype.base_type = &bad_ctype;
+	}
 	token = declarator(token, &ctx);
 	apply_modifiers(token->pos, &ctx);
 	sym->ctype = ctx.ctype;
@@ -3199,6 +3246,7 @@ struct token *external_declaration(struct token *token, struct symbol_list **lis
 	struct symbol *base_type;
 	unsigned long mod;
 	int is_typedef;
+	bool delay_bind = false;
 
 	/* Top-level inline asm or static assertion? */
 	if (token_type(token) == TOKEN_IDENT) {
@@ -3213,6 +3261,9 @@ struct token *external_declaration(struct token *token, struct symbol_list **lis
 	decl = alloc_symbol(token->pos, SYM_NODE);
 	/* Just a type declaration? */
 	if (match_op(token, ';')) {
+		if (ctx.autotype)
+			sparse_error(token->pos, "%s in empty declaration",
+				     ctx.has_auto ? "auto" : "__auto_type");
 		apply_modifiers(token->pos, &ctx);
 		return token->next;
 	}
@@ -3226,6 +3277,7 @@ struct token *external_declaration(struct token *token, struct symbol_list **lis
 	decl->ctype = ctx.ctype;
 	decl->ctype.modifiers |= mod;
 	decl->cleanup = ctx.cleanup;
+	decl->c23_auto = ctx.autotype && ctx.has_auto;
 	decl->endpos = token->pos;
 
 	/* Just a type declaration? */
@@ -3241,9 +3293,15 @@ struct token *external_declaration(struct token *token, struct symbol_list **lis
 	if (is_typedef)
 		decl->ctype.modifiers |= MOD_USERTYPE;
 
-	bind_symbol(decl, ident, is_typedef ? NS_TYPEDEF: NS_SYMBOL);
-
 	base_type = decl->ctype.base_type;
+	if (!is_typedef && ctx.autotype && !ctx.has_auto &&
+	    base_type == &autotype_ctype) {
+		struct symbol *prev = lookup_symbol(ident, NS_SYMBOL | NS_TYPEDEF);
+		if (prev && is_outer_scope(prev->scope))
+			delay_bind = true;
+	}
+	if (!delay_bind)
+		bind_symbol(decl, ident, is_typedef ? NS_TYPEDEF: NS_SYMBOL);
 
 	if (is_typedef) {
 		if (base_type && !base_type->ident) {
@@ -3260,8 +3318,9 @@ struct token *external_declaration(struct token *token, struct symbol_list **lis
 		}
 	} else if (base_type && base_type->type == SYM_FN) {
 		if (base_type->ctype.base_type == &autotype_ctype) {
-			sparse_error(decl->pos, "'%s()' has __auto_type return type",
-				show_ident(decl->ident));
+			sparse_error(decl->pos, "'%s()' has %s return type",
+				     show_ident(decl->ident),
+				     ctx.has_auto ? "auto" : "__auto_type");
 			base_type->ctype.base_type = &int_ctype;
 		}
 		if (base_type->ctype.base_type == &incomplete_ctype) {
@@ -3301,11 +3360,26 @@ struct token *external_declaration(struct token *token, struct symbol_list **lis
 	for (;;) {
 		if (!is_typedef && match_op(token, '=')) {
 			struct token *next = token->next;
+			bool mark_underspec = decl->c23_auto;
+			if (mark_underspec)
+				decl->underspecified = 1;
 			token = initializer(&decl->initializer, next);
+			if (mark_underspec)
+				decl->underspecified = 0;
 			if (token == next)
 				sparse_error(token->pos, "expression expected before '%s'", show_token(token));
 		}
+		if (delay_bind) {
+			bind_symbol(decl, ident, is_typedef ? NS_TYPEDEF : NS_SYMBOL);
+			delay_bind = false;
+		}
 		if (!is_typedef) {
+			if (!ctx.autotype && (ctx.storage_class & MOD_AUTO) &&
+			    toplevel(block_scope))
+				sparse_error(
+					decl->pos,
+					"file-scope declaration of '%s' specifies 'auto'",
+					show_ident(decl->ident));
 			if (validate_decl)
 				validate_decl(decl);
 
@@ -3329,19 +3403,51 @@ struct token *external_declaration(struct token *token, struct symbol_list **lis
 			}
 		}
 
+		if (!is_typedef && decl->c23_auto &&
+		    (!decl->ctype.base_type ||
+		     decl->ctype.base_type->type != SYM_FN)) {
+			struct symbol *prev;
+			for (prev = decl->next_id; prev; prev = prev->next_id) {
+				if (prev->namespace != decl->namespace ||
+				    prev->builtin)
+					continue;
+				if (prev->scope == decl->scope ||
+				    (toplevel(decl->scope) &&
+				     toplevel(prev->scope))) {
+					sparse_error(
+						decl->pos,
+						"underspecified declaration of '%s', which is already declared in this scope",
+						show_ident(decl->ident));
+					break;
+				}
+			}
+		}
+
 		if (ctx.autotype) {
 			const char *msg = NULL;
-			if (decl->ctype.base_type != &autotype_ctype)
+			struct expression *init = decl->initializer;
+			while (init && init->type == EXPR_PREOP && init->op == '(')
+				init = init->unop;
+			if (is_typedef)
+				msg = "cannot be used with typedef";
+			else if (decl->ctype.base_type != &autotype_ctype)
 				msg = "on non-identifier";
 			else if (match_op(token, ','))
 				msg = "on declaration list";
 			else if (!decl->initializer)
 				msg = "without initializer";
-			else if (decl->initializer->type == EXPR_SYMBOL &&
-				 decl->initializer->symbol == decl)
+			else if (decl->initializer->type == EXPR_INITIALIZER) {
+				msg = "requires a scalar initializer expression";
+				decl->initializer = NULL;
+			} else if (!ctx.has_auto && init &&
+				   init->type == EXPR_SYMBOL &&
+				   init->symbol == decl)
 				msg = "on self-init var";
 			if (msg) {
-				sparse_error(decl->pos, "__auto_type %s", msg);
+				sparse_error(decl->pos, "%s %s",
+					     ctx.has_auto ? "auto" :
+							    "__auto_type",
+					     msg);
 				decl->ctype.base_type = &bad_ctype;
 			}
 		}
@@ -3391,6 +3497,7 @@ struct token *external_declaration(struct token *token, struct symbol_list **lis
 		decl->ctype = ctx.ctype;
 		decl->ctype.modifiers |= mod;
 		decl->cleanup = ctx.cleanup;
+		decl->c23_auto = ctx.autotype && ctx.has_auto;
 		decl->endpos = token->pos;
 		if (!ident) {
 			sparse_error(token->pos, "expected identifier name in type definition");

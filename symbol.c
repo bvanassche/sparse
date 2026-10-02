@@ -266,14 +266,67 @@ static struct symbol *examine_base_type(struct symbol *sym)
 	struct symbol *base_type;
 
 	if (sym->ctype.base_type == &autotype_ctype) {
-		struct symbol *type = evaluate_expression(sym->initializer);
-		if (!type)
+		struct symbol *type;
+		sym->ctype.base_type = &bad_ctype;
+		if (!sym->initializer || sym->initializer->type == EXPR_INITIALIZER) {
+			type = &bad_ctype;
+		} else {
+			if (sym->c23_auto)
+				sym->underspecified = 1;
+			type = evaluate_expression(sym->initializer);
+			if (sym->c23_auto)
+				sym->underspecified = 0;
+		}
+		if (!type || type == sym || type->ctype.base_type == &autotype_ctype)
 			type = &bad_ctype;
 		if (is_bitfield_type(type)) {
-			warning(sym->pos, "__auto_type on bitfield");
+			if (!sym->c23_auto)
+				warning(sym->pos, "__auto_type on bitfield");
 			if (type->type == SYM_NODE)
 				type = type->ctype.base_type;
 			type = type->ctype.base_type;
+		}
+		if (type->type == SYM_NODE &&
+		    type->ctype.base_type->type == SYM_ARRAY) {
+			struct symbol *array = type->ctype.base_type;
+			struct symbol *ptr = alloc_symbol(sym->pos, SYM_PTR);
+			ptr->ctype.base_type = array->ctype.base_type;
+			combine_address_space(sym->pos, &ptr->ctype.as, type->ctype.as);
+			combine_address_space(sym->pos, &ptr->ctype.as, array->ctype.as);
+			ptr->ctype.modifiers |= (type->ctype.modifiers | array->ctype.modifiers) & MOD_PTRINHERIT;
+			ptr->bit_size = bits_in_pointer;
+			ptr->ctype.alignment = pointer_alignment;
+			type = ptr;
+		} else if (type->type == SYM_ARRAY) {
+			struct symbol *ptr = alloc_symbol(sym->pos, SYM_PTR);
+			ptr->ctype.base_type = type->ctype.base_type;
+			combine_address_space(sym->pos, &ptr->ctype.as, type->ctype.as);
+			ptr->ctype.modifiers |= type->ctype.modifiers & MOD_PTRINHERIT;
+			ptr->bit_size = bits_in_pointer;
+			ptr->ctype.alignment = pointer_alignment;
+			type = ptr;
+		} else if (type->type == SYM_NODE &&
+			   type->ctype.base_type->type == SYM_FN) {
+			struct symbol *ptr = alloc_symbol(sym->pos, SYM_PTR);
+			ptr->ctype.base_type = type->ctype.base_type;
+			ptr->bit_size = bits_in_pointer;
+			ptr->ctype.alignment = pointer_alignment;
+			type = ptr;
+		} else if (type->type == SYM_FN) {
+			struct symbol *ptr = alloc_symbol(sym->pos, SYM_PTR);
+			ptr->ctype.base_type = type;
+			ptr->bit_size = bits_in_pointer;
+			ptr->ctype.alignment = pointer_alignment;
+			type = ptr;
+		} else if (sym->c23_auto) {
+			/*
+			 * C23 6.7.10p2: inferred type is the type of the
+			 * assignment expression after lvalue, array-to-pointer,
+			 * or function-to-pointer conversion (stripping top-level
+			 * qualifiers and atomic).
+			 */
+			while (type->type == SYM_NODE)
+				type = type->ctype.base_type;
 		}
 		sym->ctype.base_type = type;
 	}

@@ -115,6 +115,7 @@ struct decl_state {
 	unsigned char autotype;
 	unsigned char forced;
 	unsigned char packed;
+	unsigned char has_auto;
 	unsigned char has_alignas;
 	unsigned char designated_init;
 	unsigned char transparent_union;
@@ -201,6 +202,8 @@ struct symbol {
 					packed:1,
 					transparent_union:1;
 			unsigned int has_alignas : 1;
+			unsigned int underspecified : 1;
+			unsigned int c23_auto : 1;
 			int		rank:3;	// arithmetic's rank
 			struct expression *array_size;
 			struct ctype ctype;
