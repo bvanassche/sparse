@@ -389,7 +389,7 @@ static struct symbol *examine_bitfield_type(struct symbol *sym)
 
 	if (!base_type)
 		return sym;
-	if (sym->bit_size > base_type->bit_size) {
+	if (sym->bit_size > effective_int_width(base_type)) {
 		sparse_error(sym->pos, "bitfield '%s' is wider (%d) than its type (%s)",
 			show_ident(sym->ident), sym->bit_size, show_typename(base_type));
 		sym->bit_size = -1;
@@ -401,7 +401,8 @@ static struct symbol *examine_bitfield_type(struct symbol *sym)
 	modifiers = base_type->ctype.modifiers;
 
 	/* use -funsigned-bitfields to determine the sign if not explicit */
-	if (!(modifiers & MOD_EXPLICITLY_SIGNED) && funsigned_bitfields)
+	if (!(modifiers & MOD_EXPLICITLY_SIGNED) &&
+	    !is_bitint_type(base_type) && funsigned_bitfields)
 		modifiers = (modifiers & ~MOD_SIGNED) | MOD_UNSIGNED;
 	sym->ctype.modifiers |= modifiers & MOD_SIGNEDNESS;
 	return sym;
@@ -456,7 +457,7 @@ static int count_array_initializer(struct symbol *t, struct expression *expr)
 	 * on T - if it's a character type, we get the length of string literal
 	 * (including NUL), otherwise we have one element here.
 	 */
-	if (t->ctype.base_type == &int_type && t->rank == -2)
+	if (t->ctype.base_type == &int_type && t->rank == -2 && !is_bitint_type(t))
 		is_char = 1;
 	else if (t == wchar_ctype && is_wstring_expr(expr))
 		is_char = 1;
@@ -581,6 +582,7 @@ static struct symbol * examine_node_type(struct symbol *sym)
 	}
 	
 	sym->bit_size = bit_size;
+	sym->bitint_width = base_type->bitint_width;
 	sym->rank = base_type->rank;
 	return sym;
 }
@@ -1134,4 +1136,50 @@ void init_ctype(void)
 	const_wchar_ctype.rank = wchar_ctype->rank;
 	const_wchar_ctype.ctype.alignment = wchar_ctype->ctype.alignment;
 	const_wchar_ctype.bit_size = wchar_ctype->bit_size;
+}
+
+struct symbol *get_bitint_type(int width, int is_signed)
+{
+	static struct symbol *bitint_types[2][129];
+	struct position pos = { .stream = 0 };
+	struct symbol *sym;
+	int u = !is_signed;
+
+	if (width < 1 || width > 128)
+		return &bad_ctype;
+
+	sym = bitint_types[u][width];
+	if (sym)
+		return sym;
+
+	sym = alloc_symbol(pos, SYM_BASETYPE);
+	sym->ctype.base_type = &int_type;
+	sym->ctype.modifiers = (is_signed ? MOD_SIGNED : MOD_UNSIGNED) |
+			       MOD_BITINT;
+	sym->bitint_width = width;
+
+	if (width <= 8) {
+		sym->bit_size = 8;
+		sym->ctype.alignment = 1;
+		sym->rank = -2;
+	} else if (width <= 16) {
+		sym->bit_size = 16;
+		sym->ctype.alignment = 2;
+		sym->rank = -1;
+	} else if (width <= 32) {
+		sym->bit_size = 32;
+		sym->ctype.alignment = 4;
+		sym->rank = 0;
+	} else if (width <= 64) {
+		sym->bit_size = 64;
+		sym->ctype.alignment = 8;
+		sym->rank = 2;
+	} else {
+		sym->bit_size = 128;
+		sym->ctype.alignment = 8;
+		sym->rank = 3;
+	}
+
+	bitint_types[u][width] = sym;
+	return sym;
 }

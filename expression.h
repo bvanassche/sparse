@@ -160,6 +160,7 @@ struct expression {
 	enum expression_type type:8;
 	unsigned flags:8;
 	unsigned zero_init:1;
+	unsigned value_neg:1;
 	int op;
 	struct position pos;
 	struct symbol *ctype;
@@ -167,6 +168,7 @@ struct expression {
 		// EXPR_VALUE
 		struct {
 			unsigned long long value;
+			unsigned long long value_hi;
 			unsigned taint;
 		};
 

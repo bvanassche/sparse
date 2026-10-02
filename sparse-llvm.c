@@ -1270,6 +1270,14 @@ static LLVMValueRef expr_to_const_val(LLVMModuleRef module, struct symbol *sym,
 
 	switch (initializer->type) {
 	case EXPR_VALUE:
+		if (effective_int_width(initializer->ctype) > 64 &&
+		    LLVMGetTypeKind(dtype) == LLVMIntegerTypeKind) {
+			uint64_t words[2] = {
+				initializer->value,
+				initializer->value_hi,
+			};
+			return LLVMConstIntOfArbitraryPrecision(dtype, 2, words);
+		}
 		return constant_value(initializer->value, dtype);
 	case EXPR_FVALUE:
 		return LLVMConstReal(dtype, initializer->fvalue);

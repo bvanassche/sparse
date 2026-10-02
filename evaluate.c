@@ -187,6 +187,8 @@ static inline struct symbol *integer_promotion(struct symbol *type)
 		type = type->ctype.base_type;
 	}
 	mod = type->ctype.modifiers;
+	if (is_bitint_type(type))
+		return type;
 	if (width < bits_in_int)
 		return &int_ctype;
 
@@ -228,6 +230,43 @@ static struct symbol *bigger_int_type(struct symbol *left, struct symbol *right)
 
 	if (left == right)
 		return left;
+
+	if (is_bitint_type(left) || is_bitint_type(right)) {
+		int lwidth = effective_int_width(left);
+		int rwidth = effective_int_width(right);
+		int lunsigned = (left->ctype.modifiers & MOD_UNSIGNED) != 0;
+		int runsigned = (right->ctype.modifiers & MOD_UNSIGNED) != 0;
+		int uwidth, swidth;
+
+		if (lunsigned == runsigned) {
+			if (lwidth > rwidth)
+				return left;
+			if (rwidth > lwidth)
+				return right;
+			return is_bitint_type(left) ? right : left;
+		}
+
+		if (lunsigned) {
+			utype = left;
+			stype = right;
+			uwidth = lwidth;
+			swidth = rwidth;
+		} else {
+			utype = right;
+			stype = left;
+			uwidth = rwidth;
+			swidth = lwidth;
+		}
+
+		if (uwidth > swidth)
+			return utype;
+		if (uwidth == swidth) {
+			if (!is_bitint_type(utype) || is_bitint_type(stype))
+				return utype;
+			return unsigned_types[stype->rank];
+		}
+		return stype;
+	}
 
 	lmod = left->ctype.modifiers;
 	rmod = right->ctype.modifiers;
@@ -879,8 +918,15 @@ const char *type_difference(struct ctype *c1, struct ctype *c2,
 				return "different base types";
 			if (!base1 && t1->bit_size != t2->bit_size)
 				return "different base types";
-			if (t1->rank != t2->rank)
-				return "different type sizes";
+			if (is_bitint_type(t1) || is_bitint_type(t2)) {
+				if (!is_bitint_type(t1) || !is_bitint_type(t2))
+					return "different base types";
+				if (t1->bitint_width != t2->bitint_width)
+					return "different bit widths";
+			} else {
+				if (t1->rank != t2->rank)
+					return "different type sizes";
+			}
 			diff = (mod1 ^ mod2) & ~MOD_IGNORE;
 			if (!diff)
 				return NULL;
@@ -1601,6 +1647,13 @@ static int whitelist_pointers(struct symbol *t1, struct symbol *t2)
 		return 0;
 	if (t1 == t2)
 		return 1;
+	if (is_bitint_type(t1) || is_bitint_type(t2)) {
+		if (!is_bitint_type(t1) || !is_bitint_type(t2))
+			return 0;
+		if (t1->bitint_width != t2->bitint_width)
+			return 0;
+		return !Wtypesign;
+	}
 	if (t1->rank == -2 && t2->rank == -2)
 		return !Wtypesign && !Wpedantic && standard < STANDARD_C23;
 	if (t1->rank != t2->rank)
@@ -3101,19 +3154,49 @@ static void check_constexpr_scalar_init(struct expression *orig,
 				     "non-constant initializer for constexpr object");
 			return;
 		}
-		sw = stype->bit_size;
+		sw = effective_int_width(stype);
 		s_unsigned = (stype->ctype.modifiers & MOD_UNSIGNED) != 0;
-		s_neg = !s_unsigned && sw > 0 && sw <= 64 &&
-			(tmp.value & sign_bit(sw)) != 0;
+		s_neg = !s_unsigned &&
+			(sw > 64 ? tmp.value_neg :
+				   (sw > 0 && (tmp.value & sign_bit(sw)) != 0));
 		if (is_bool_type(ttype)) {
-			if (s_neg || (tmp.value != 0 && tmp.value != 1))
+			if (s_neg || tmp.value_hi != 0 ||
+			    (tmp.value != 0 && tmp.value != 1))
 				sparse_error(
 					orig->pos,
 					"constexpr initializer not representable in target type");
 			return;
 		}
-		tw = ttype->bit_size;
+		tw = effective_int_width(ttype);
 		t_unsigned = (ttype->ctype.modifiers & MOD_UNSIGNED) != 0;
+#ifdef __SIZEOF_INT128__
+		if (s_neg) {
+			__int128 sval =
+				sw > 64 ?
+					(__int128)(((unsigned __int128)tmp.value_hi << 64) |
+						   tmp.value) :
+					(__int128)bits_extend(tmp.value, sw, 1);
+			if (t_unsigned ||
+			    (tw < 128 && sval < -((__int128)1 << (tw - 1))))
+				sparse_error(
+					orig->pos,
+					"constexpr initializer not representable in target type");
+		} else {
+			unsigned __int128 uval =
+				sw > 64 ?
+					(((unsigned __int128)tmp.value_hi << 64) |
+					 tmp.value) :
+					(unsigned __int128)(unsigned long long)zero_extend(
+						tmp.value, sw);
+			int max_bits = t_unsigned ? tw : (tw - 1);
+			if ((max_bits <= 0 && uval != 0) ||
+			    (max_bits > 0 && max_bits < 128 &&
+			     (uval >> max_bits) != 0))
+				sparse_error(
+					orig->pos,
+					"constexpr initializer not representable in target type");
+		}
+#else
 		if (s_neg) {
 			long long sval = sw > 64 ? (long long)tmp.value :
 						   bits_extend(tmp.value, sw, 1);
@@ -3134,6 +3217,7 @@ static void check_constexpr_scalar_init(struct expression *orig,
 					orig->pos,
 					"constexpr initializer not representable in target type");
 		}
+#endif
 		return;
 	}
 
@@ -3166,10 +3250,11 @@ static void check_constexpr_scalar_init(struct expression *orig,
 						"constexpr initializer not representable in target type");
 			}
 		} else if (is_int(sclass)) {
-			int sw = stype->bit_size;
+			int sw = effective_int_width(stype);
 			bool s_unsigned = (stype->ctype.modifiers & MOD_UNSIGNED) != 0;
-			bool s_neg = !s_unsigned && sw > 0 && sw <= 64 &&
-				     (tmp.value & sign_bit(sw)) != 0;
+			bool s_neg = !s_unsigned &&
+				     (sw > 64 ? tmp.value_neg :
+						(sw > 0 && (tmp.value & sign_bit(sw)) != 0));
 			if (tmp.type != EXPR_VALUE) {
 				sparse_error(
 					orig->pos,

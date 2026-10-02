@@ -1824,7 +1824,7 @@ static pseudo_t linearize_cond_branch(struct entrypoint *ep, struct expression *
 
 	case EXPR_STRING:
 	case EXPR_VALUE:
-		add_goto(ep, expr->value ? bb_true : bb_false);
+		add_goto(ep, (expr->value || expr->value_hi) ? bb_true : bb_false);
 		break;
 	case EXPR_FVALUE:
 		add_goto(ep, expr->fvalue ? bb_true : bb_false);
@@ -1920,6 +1920,27 @@ static pseudo_t linearize_expression(struct entrypoint *ep, struct expression *e
 		return add_symbol_address(ep, expr);
 
 	case EXPR_VALUE:
+		if (effective_int_width(expr->ctype) > 64) {
+			if (expr->value_hi != (expr->value_neg ? ~0ULL : 0ULL) ||
+			    (expr->value_neg && !(expr->value & (1ULL << 63)))) {
+				pseudo_t hi = cast_pseudo(
+					ep, value_pseudo(expr->value_hi),
+					&ullong_ctype, expr->ctype);
+				hi = add_binary_op(ep, expr->ctype, OP_SHL, hi,
+						   value_pseudo(64));
+				if (expr->value) {
+					pseudo_t lo = cast_pseudo(
+						ep, value_pseudo(expr->value),
+						&ullong_ctype, expr->ctype);
+					hi = add_binary_op(ep, expr->ctype,
+							   OP_OR, hi, lo);
+				}
+				return hi;
+			}
+			if (!expr->value_neg && (expr->value & (1ULL << 63)))
+				return cast_pseudo(ep, value_pseudo(expr->value),
+						   &ullong_ctype, expr->ctype);
+		}
 		return value_pseudo(expr->value);
 
 	case EXPR_STRING:

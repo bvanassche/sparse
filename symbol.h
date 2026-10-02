@@ -122,6 +122,8 @@ struct decl_state {
 	unsigned char designated_init;
 	unsigned char transparent_union;
 	unsigned char opaque_fixed_enum;
+	long long bitint_width;
+	struct position bitint_pos;
 	struct position opaque_fixed_enum_pos;
 };
 
@@ -189,14 +191,25 @@ struct symbol {
 		struct /* NS_SYMBOL */ {
 			unsigned long	offset;
 			int		bit_size;
-			unsigned int bit_offset : 8, bogus_linear : 1,
-				variadic : 1, initialized : 1, examined : 1,
-				expanding : 1, evaluated : 1,
-				has_flex_array : 1, string : 1,
-				designated_init : 1, forced_arg : 1,
-				accessed : 1, builtin : 1, torename : 1,
-				packed : 1, transparent_union : 1,
-				fixed_type : 1, explicit_typedef : 1;
+			int bitint_width;
+			unsigned int bit_offset : 8;
+			unsigned int bogus_linear : 1;
+			unsigned int variadic : 1;
+			unsigned int initialized : 1;
+			unsigned int examined : 1;
+			unsigned int expanding : 1;
+			unsigned int evaluated : 1;
+			unsigned int has_flex_array : 1;
+			unsigned int string : 1;
+			unsigned int designated_init : 1;
+			unsigned int forced_arg : 1;
+			unsigned int accessed : 1;
+			unsigned int builtin : 1;
+			unsigned int torename : 1;
+			unsigned int packed : 1;
+			unsigned int transparent_union : 1;
+			unsigned int fixed_type : 1;
+			unsigned int explicit_typedef : 1;
 			unsigned int has_alignas : 1;
 			unsigned int kr_args : 1;
 			unsigned int underspecified : 1;
@@ -252,7 +265,7 @@ struct symbol {
 #define MOD_GNU_INLINE		0x00010000
 #define MOD_USERTYPE		0x00020000
 #define MOD_CONSTEXPR 0x00040000
-// MOD UNUSED		0x00080000
+#define MOD_BITINT 0x00080000
 // MOD UNUSED		0x00100000
 // MOD UNUSED		0x00200000
 
@@ -271,7 +284,7 @@ struct symbol {
 #define MOD_STORAGE	(MOD_AUTO | MOD_REGISTER | MOD_STATIC | MOD_EXTERN | MOD_INLINE | MOD_TOPLEVEL)
 #define MOD_ESIGNED	(MOD_SIGNED | MOD_EXPLICITLY_SIGNED)
 #define MOD_SIGNEDNESS	(MOD_SIGNED | MOD_UNSIGNED | MOD_EXPLICITLY_SIGNED)
-#define MOD_SPECIFIER	MOD_SIGNEDNESS
+#define MOD_SPECIFIER (MOD_SIGNEDNESS | MOD_BITINT)
 #define MOD_IGNORE	(MOD_STORAGE | MOD_ACCESS | MOD_USERTYPE | MOD_EXPLICITLY_SIGNED | MOD_EXT_VISIBLE | MOD_UNUSED | MOD_GNU_INLINE | MOD_CONSTEXPR)
 #define MOD_QUALIFIER	(MOD_CONST | MOD_VOLATILE | MOD_RESTRICT)
 /* modifiers for function attributes */
@@ -412,6 +425,29 @@ static inline int is_signed_type(struct symbol *sym)
 	return !(sym->ctype.modifiers & MOD_UNSIGNED);
 }
 
+static inline int is_bitint_type(const struct symbol *sym)
+{
+	while (sym && sym->type == SYM_NODE)
+		sym = sym->ctype.base_type;
+	return sym && (sym->ctype.modifiers & MOD_BITINT);
+}
+
+static inline int effective_int_width(const struct symbol *type)
+{
+	if (!type)
+		return 0;
+	while (type->type == SYM_NODE) {
+		type = type->ctype.base_type;
+		if (!type)
+			return 0;
+	}
+	if ((type->ctype.modifiers & MOD_BITINT) && type->bitint_width > 0)
+		return type->bitint_width;
+	return type->bit_size;
+}
+
+extern struct symbol *get_bitint_type(int width, int is_signed);
+
 static inline int is_type_type(struct symbol *type)
 {
 	return type == &type_ctype;
@@ -468,7 +504,8 @@ static inline int is_float_type(struct symbol *type)
 
 static inline int is_byte_type(struct symbol *type)
 {
-	return type->bit_size == bits_in_char && type->type != SYM_BITFIELD;
+	return type->bit_size == bits_in_char && type->type != SYM_BITFIELD &&
+	       !is_bitint_type(type);
 }
 
 static inline int is_wchar_type(struct symbol *type)
@@ -575,7 +612,7 @@ static inline int get_sym_type(struct symbol *type)
 static inline long long extend_value(long long val, struct symbol *ctype)
 {
 	int is_signed = !(ctype->ctype.modifiers & MOD_UNSIGNED);
-	unsigned size = ctype->bit_size;
+	unsigned size = effective_int_width(ctype);
 
 	return bits_extend(val, size, is_signed);
 }

@@ -44,6 +44,7 @@ IDENT_RESERVED(_Static_assert);
 IDENT(_Thread_local);
 
 /* C23 keywords */
+IDENT(_BitInt);
 IDENT(alignas);
 IDENT(alignof);
 IDENT(bool);
