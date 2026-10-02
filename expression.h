@@ -319,6 +319,7 @@ static inline struct expression *alloc_const_expression(struct position pos, int
 
 /* Type name parsing */
 struct token *typename(struct token *, struct symbol **, int *);
+void check_typename_storage(struct symbol *sym);
 
 static inline int lookup_type(struct token *token)
 {

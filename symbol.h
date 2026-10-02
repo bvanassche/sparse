@@ -196,7 +196,7 @@ struct symbol {
 				designated_init : 1, forced_arg : 1,
 				accessed : 1, builtin : 1, torename : 1,
 				packed : 1, transparent_union : 1,
-				fixed_type : 1;
+				fixed_type : 1, explicit_typedef : 1;
 			unsigned int has_alignas : 1;
 			unsigned int kr_args : 1;
 			unsigned int underspecified : 1;
@@ -282,7 +282,7 @@ struct symbol {
 /* like cvr-qualifiers but 'reversed' (OK: source <= target) */
 #define MOD_REV_QUAL	(MOD_PURE|MOD_NORETURN)
 /* do not warn when these are duplicated */
-#define MOD_DUP_OK	(MOD_UNUSED|MOD_GNU_INLINE)
+#define MOD_DUP_OK	(MOD_UNUSED|MOD_GNU_INLINE|MOD_USERTYPE)
 /* must be part of the declared symbol, not its type */
 #define MOD_DECLARE                                                         \
 	(MOD_STORAGE | MOD_INLINE | MOD_TLS | MOD_GNU_INLINE | MOD_UNUSED | \

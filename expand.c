@@ -848,9 +848,8 @@ static int expand_dereference(struct expression *expr)
 				expr->type = EXPR_VALUE;
 				expr->value = value->value;
 				expr->taint = 0;
-				if ((sym->ctype.modifiers & MOD_CONSTEXPR) &&
-				    is_int_type(ctype))
-					expr->flags = CEF_SET_ICE;
+				if (sym->ctype.modifiers & MOD_CONSTEXPR)
+					expr->flags = is_int_type(ctype) ? CEF_SET_ICE : CEF_ADDR;
 				return 0;
 			} else if (value->type == EXPR_FVALUE) {
 				if (!is_float_type(ctype))

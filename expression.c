@@ -150,6 +150,7 @@ static struct token *parse_type(struct token *token, struct expression **tree)
 	struct symbol *sym;
 	*tree = alloc_expression(token->pos, EXPR_TYPE);
 	token = typename(token, &sym, NULL);
+	check_typename_storage(sym);
 	if (sym->ident)
 		sparse_error(token->pos,
 			     "type expression should not include identifier "
@@ -198,6 +199,7 @@ static struct token *builtin_offsetof_expr(struct token *token,
 
 	token = token->next;
 	token = typename(token, &sym, NULL);
+	check_typename_storage(sym);
 	if (sym->ident)
 		sparse_error(token->pos,
 			     "type expression should not include identifier "
@@ -569,6 +571,7 @@ static struct token *generic_selection(struct token *token, struct expression **
 		if (lookup_type(token)) {
 			struct type_expression *map = __alloc_type_expression(0);
 			token = typename(token, &map->type, NULL);
+			check_typename_storage(map->type);
 			token = expect(token, ':', "after typename");
 			token = assignment_expression(token, &map->expr);
 			if (!map->expr)
@@ -730,6 +733,7 @@ struct token *primary_expression(struct token *token, struct expression **tree)
 		if (token->special == '[' && lookup_type(token->next)) {
 			expr = alloc_expression(token->pos, EXPR_TYPE);
 			token = typename(token->next, &expr->symbol, NULL);
+			check_typename_storage(expr->symbol);
 			token = expect(token, ']', "in type expression");
 			break;
 		}
@@ -837,6 +841,46 @@ static struct token *postfix_expression(struct token *token, struct expression *
 static struct token *cast_expression(struct token *token, struct expression **tree);
 static struct token *unary_expression(struct token *token, struct expression **tree);
 
+static void check_compound_literal_storage(struct symbol *sym, int is_force)
+{
+	unsigned long mods;
+
+	if (toplevel(block_scope))
+		sym->ctype.modifiers |= MOD_TOPLEVEL;
+	if (is_force)
+		warning(sym->pos, "[force] in compound literal");
+	mods = sym->ctype.modifiers;
+	if (mods & MOD_EXTERN) {
+		sparse_error(sym->pos, "'extern' is not allowed in compound literal");
+		return;
+	}
+	if (sym->explicit_typedef) {
+		sparse_error(sym->pos, "'typedef' is not allowed in compound literal");
+		return;
+	}
+	if ((mods & MOD_AUTO) || sym->ctype.base_type == &autotype_ctype) {
+		sparse_error(sym->pos, "'auto' is not allowed in compound literal");
+		if (sym->ctype.base_type == &autotype_ctype)
+			sym->ctype.base_type = &int_ctype;
+		return;
+	}
+	if ((mods & MOD_TOPLEVEL) && (mods & MOD_REGISTER)) {
+		sparse_error(sym->pos,
+			     "file-scope compound literal cannot specify 'register'");
+		return;
+	}
+	if (!(mods & MOD_TOPLEVEL) && (mods & MOD_TLS) && !(mods & MOD_STATIC)) {
+		sparse_error(sym->pos,
+			     "block-scope compound literal with 'thread_local' requires 'static'");
+		return;
+	}
+	if (mods & (MOD_STATIC | MOD_REGISTER | MOD_TLS | MOD_CONSTEXPR)) {
+		if (standard < STANDARD_C23 && Wpedantic)
+			warning(sym->pos,
+				"storage-class specifiers in compound literals are a C23 feature");
+	}
+}
+
 static struct token *type_info_expression(struct token *token,
 	struct expression **tree, int type)
 {
@@ -845,6 +889,7 @@ static struct token *type_info_expression(struct token *token,
 	bool std_alignof = (op_ident == &_Alignof_ident ||
 			    op_ident == &alignof_ident);
 	struct token *p;
+	int is_force = 0;
 
 	*tree = expr;
 	expr->flags = CEF_SET_ICE; /* XXX: VLA support will need that changed */
@@ -857,7 +902,7 @@ static struct token *type_info_expression(struct token *token,
 		return unary_expression(token, &expr->cast_expression);
 	}
 	p = token;
-	token = typename(token->next, &expr->cast_type, NULL);
+	token = typename(token->next, &expr->cast_type, &is_force);
 
 	if (!match_op(token, ')')) {
 		static const char * error[] = {
@@ -865,6 +910,7 @@ static struct token *type_info_expression(struct token *token,
 			[EXPR_ALIGNOF] = "at end of __alignof__",
 			[EXPR_PTRSIZEOF] = "at end of __sizeof_ptr__"
 		};
+		check_typename_storage(expr->cast_type);
 		return expect(token, ')', error[type]);
 	}
 
@@ -874,16 +920,20 @@ static struct token *type_info_expression(struct token *token,
 	 * of a typed initializer expression..
 	 */
 	if (match_op(token, '{')) {
+		struct symbol *sym = expr->cast_type;
 		struct expression *cast = alloc_expression(p->pos, EXPR_CAST);
 		if (std_alignof && Wpedantic)
 			warning(expr->pos,
 				"ISO C does not allow '%s' on an expression",
 				show_ident(op_ident));
-		cast->cast_type = expr->cast_type;
+		check_compound_literal_storage(sym, is_force);
+		cast->cast_type = sym;
 		expr->cast_type = NULL;
 		expr->cast_expression = cast;
 		token = initializer(&cast->cast_expression, token);
 		token = postfix_expression(token, &expr->cast_expression, cast);
+	} else {
+		check_typename_storage(expr->cast_type);
 	}
 	return token;
 }
@@ -993,14 +1043,11 @@ static struct token *cast_expression(struct token *token, struct expression **tr
 			cast->cast_type = sym;
 			token = expect(token, ')', "at end of cast operator");
 			if (match_op(token, '{')) {
-				if (toplevel(block_scope))
-					sym->ctype.modifiers |= MOD_TOPLEVEL;
-				if (is_force)
-					warning(sym->pos,
-						"[force] in compound literal");
+				check_compound_literal_storage(sym, is_force);
 				token = initializer(&cast->cast_expression, token);
 				return postfix_expression(token, tree, cast);
 			}
+			check_typename_storage(sym);
 			*tree = cast;
 			if (is_force)
 				cast->type = EXPR_FORCE_CAST;

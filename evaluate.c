@@ -1918,7 +1918,10 @@ static struct symbol *create_pointer(struct expression *expr, struct symbol *sym
 
 	access_symbol(sym);
 	if (sym->ctype.modifiers & MOD_REGISTER) {
-		warning(expr->pos, "taking address of 'register' variable '%s'", show_ident(sym->ident));
+		if (sym->ident)
+			warning(expr->pos, "taking address of 'register' variable '%s'", show_ident(sym->ident));
+		else
+			warning(expr->pos, "taking address of 'register' compound literal");
 		sym->ctype.modifiers &= ~MOD_REGISTER;
 	}
 	if (sym->type == SYM_NODE) {
@@ -2944,7 +2947,7 @@ found:
 		else
 			v = &top->ident_expression;
 
-		mods |= ctype->ctype.modifiers & (MOD_STORAGE | MOD_CONSTEXPR);
+		mods |= ctype->ctype.modifiers & (MOD_STORAGE | MOD_TLS | MOD_CONSTEXPR);
 		if (handle_initializer(v, 1, lclass, top->ctype, mods))
 			continue;
 
@@ -3236,10 +3239,14 @@ static int handle_initializer(struct expression **ep, int nested,
 		mods |= ctype->ctype.modifiers;
 		if (mods & MOD_CONSTEXPR)
 			check_constexpr_scalar_init(&orig, ctype);
-		if ((mods & (MOD_TOPLEVEL | MOD_STATIC)) &&
-		    !(e->flags & (CEF_ACE | CEF_ADDR)))
-			if (Wconstexpr_not_const)
+		else if ((mods & (MOD_TOPLEVEL | MOD_STATIC | MOD_TLS)) &&
+			 valid_type(ctype->ctype.base_type) &&
+			 !(e->flags & (CEF_ACE | CEF_ADDR))) {
+			if (standard >= STANDARD_C23)
+				sparse_error(e->pos, "non-constant initializer for static object");
+			else if (Wconstexpr_not_const)
 				warning(e->pos, "non-constant initializer for static object");
+		}
 
 		return 1;
 	}
@@ -3443,13 +3450,22 @@ static struct symbol *evaluate_compound_literal(struct expression *expr, struct 
 
 	addr->ctype = &lazy_ptr_ctype;	/* Lazy eval */
 	addr->symbol = sym;
-	if (sym->ctype.modifiers & MOD_TOPLEVEL)
+	if (sym->ctype.modifiers & (MOD_TOPLEVEL | MOD_STATIC | MOD_TLS))
 		addr->flags |= CEF_ADDR;
 
 	expr->type = EXPR_PREOP;
 	expr->op = '*';
 	expr->deref = addr;
 	expr->ctype = sym;
+	if (sym->ctype.modifiers & MOD_CONSTEXPR) {
+		struct symbol *base_type = get_base_type(sym);
+		if (is_float_type(base_type))
+			expr->flags = CEF_SET_FLOAT;
+		else if (is_int_type(base_type))
+			expr->flags = CEF_SET_ICE;
+		else
+			expr->flags = CEF_ADDR;
+	}
 	return sym;
 }
 
