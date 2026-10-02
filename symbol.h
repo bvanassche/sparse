@@ -120,6 +120,8 @@ struct decl_state {
 	unsigned char is_constexpr;
 	unsigned char designated_init;
 	unsigned char transparent_union;
+	unsigned char opaque_fixed_enum;
+	struct position opaque_fixed_enum_pos;
 };
 
 struct pseudo;
@@ -186,22 +188,14 @@ struct symbol {
 		struct /* NS_SYMBOL */ {
 			unsigned long	offset;
 			int		bit_size;
-			unsigned int	bit_offset:8,
-					bogus_linear:1,
-					variadic:1,
-					initialized:1,
-					examined:1,
-					expanding:1,
-					evaluated:1,
-					has_flex_array:1,
-					string:1,
-					designated_init:1,
-					forced_arg:1,
-					accessed:1,
-					builtin:1,
-					torename:1,
-					packed:1,
-					transparent_union:1;
+			unsigned int bit_offset : 8, bogus_linear : 1,
+				variadic : 1, initialized : 1, examined : 1,
+				expanding : 1, evaluated : 1,
+				has_flex_array : 1, string : 1,
+				designated_init : 1, forced_arg : 1,
+				accessed : 1, builtin : 1, torename : 1,
+				packed : 1, transparent_union : 1,
+				fixed_type : 1;
 			unsigned int has_alignas : 1;
 			unsigned int underspecified : 1;
 			unsigned int c23_auto : 1;
@@ -435,6 +429,13 @@ static inline int is_func_type(struct symbol *type)
 	return type->type == SYM_FN;
 }
 
+static inline struct symbol *cbase_type(struct symbol *sym)
+{
+	while (sym && sym->type == SYM_NODE)
+		sym = sym->ctype.base_type;
+	return sym;
+}
+
 static inline int is_array_type(struct symbol *type)
 {
 	if (type->type == SYM_NODE)
@@ -484,9 +485,8 @@ static inline int is_void_type(struct symbol *type)
 
 static inline int is_bool_type(struct symbol *type)
 {
-	if (type->type == SYM_NODE)
-		type = type->ctype.base_type;
-	if (type->type == SYM_BITFIELD)
+	while (type && (type->type == SYM_NODE || type->type == SYM_ENUM ||
+			type->type == SYM_BITFIELD))
 		type = type->ctype.base_type;
 	return type == &bool_ctype;
 }

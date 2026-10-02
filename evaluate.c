@@ -2486,7 +2486,7 @@ static struct symbol *evaluate_sizeof(struct expression *expr)
 	}
 
 	if (is_bool_type(type)) {
-		if (Wsizeof_bool)
+		if (Wsizeof_bool && cbase_type(type) == &bool_ctype)
 			warning(expr->pos, "expression using sizeof _Bool");
 		size = bits_to_bytes(bits_in_bool) * bits_in_char;
 	}

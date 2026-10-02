@@ -584,12 +584,21 @@ static struct symbol *examine_enum_type(struct symbol *sym)
 	struct symbol *base_type = examine_base_type(sym);
 
 	sym->ctype.modifiers |= (base_type->ctype.modifiers & MOD_SIGNEDNESS);
-	sym->bit_size = bits_in_enum;
-	if (base_type->bit_size > sym->bit_size)
-		sym->bit_size = base_type->bit_size;
-	sym->ctype.alignment = enum_alignment;
-	if (base_type->ctype.alignment > sym->ctype.alignment)
+	if (sym->fixed_type) {
+		if (base_type == &bool_ctype)
+			sym->bit_size = bits_to_bytes(bits_in_bool) * bits_in_char;
+		else
+			sym->bit_size = base_type->bit_size;
 		sym->ctype.alignment = base_type->ctype.alignment;
+	} else {
+		sym->bit_size = bits_in_enum;
+		if (base_type->bit_size > sym->bit_size)
+			sym->bit_size = base_type->bit_size;
+		sym->ctype.alignment = enum_alignment;
+		if (base_type->ctype.alignment > sym->ctype.alignment)
+			sym->ctype.alignment = base_type->ctype.alignment;
+	}
+	sym->rank = base_type->rank;
 	return sym;
 }
 

@@ -50,6 +50,7 @@ struct statement_list *function_computed_goto_list;
 
 static struct token *statement(struct token *token, struct statement **tree);
 static struct token *handle_attributes(struct token *token, struct decl_state *ctx);
+static struct token *skip_attributes(struct token *token);
 
 typedef struct token *declarator_t(struct token *, struct symbol *, struct decl_state *);
 static declarator_t
@@ -765,6 +766,32 @@ struct symbol *label_symbol(struct token *token, int used)
 	return sym;
 }
 
+static struct symbol *canonical_enum_underlying_type(struct symbol *sym)
+{
+	sym = cbase_type(sym);
+	if (sym == &sshort_ctype)
+		return &short_ctype;
+	if (sym == &sint_ctype)
+		return &int_ctype;
+	if (sym == &slong_ctype)
+		return &long_ctype;
+	if (sym == &sllong_ctype)
+		return &llong_ctype;
+	if (sym == &sint128_ctype)
+		return &int128_ctype;
+	return sym;
+}
+
+static bool has_enum_type_specifier(struct token *token)
+{
+	struct token *next;
+
+	if (!match_op(token, ':'))
+		return false;
+	next = skip_attributes(token->next);
+	return lookup_type(next) != 0;
+}
+
 static struct token *struct_union_enum_specifier(enum type type,
 	struct token *token, struct decl_state *ctx,
 	struct token *(*parse)(struct token *, struct symbol *))
@@ -778,7 +805,10 @@ static struct token *struct_union_enum_specifier(enum type type,
 		sym = lookup_symbol(token->ident, NS_STRUCT);
 		if (!sym ||
 		    (is_outer_scope(sym->scope) &&
-		     (match_op(token->next,';') || match_op(token->next,'{')))) {
+		     (match_op(token->next, ';') ||
+		      match_op(token->next, '{') ||
+		      (type == SYM_ENUM &&
+		       has_enum_type_specifier(token->next))))) {
 			// Either a new symbol, or else an out-of-scope
 			// symbol being redefined.
 			sym = alloc_symbol(token->pos, type);
@@ -789,6 +819,60 @@ static struct token *struct_union_enum_specifier(enum type type,
 		ctx->ctype.base_type = sym;
 		repos = &token->pos;
 		token = token->next;
+
+		if (type == SYM_ENUM && has_enum_type_specifier(token)) {
+			struct position colon_pos = token->pos;
+			struct symbol *underlying = NULL;
+			if (standard < STANDARD_C23 && Wpedantic)
+				warning(token->pos,
+					"ISO C does not support specifying 'enum' underlying types before C23");
+			token = typename(token->next, &underlying, NULL);
+			underlying = examine_symbol_type(underlying);
+			if (!underlying || !is_int_type(underlying) ||
+			    is_enum_type(underlying)) {
+				sparse_error(token->pos,
+					     "invalid 'enum' underlying type");
+				underlying = &int_ctype;
+			}
+			underlying = canonical_enum_underlying_type(underlying);
+			if (sym->fixed_type) {
+				if (canonical_enum_underlying_type(sym->ctype.base_type) !=
+				    underlying)
+					sparse_error(
+						token->pos,
+						"'enum' underlying type incompatible with previous declaration");
+			} else if (sym->examined || sym->symbol_list ||
+				   (sym->ctype.base_type ==
+				    &incomplete_ctype)) {
+				sparse_error(
+					token->pos,
+					"'enum' declared both with and without fixed underlying type");
+			} else {
+				sym->fixed_type = 1;
+				sym->ctype.base_type = underlying;
+				sym->ctype.modifiers |=
+					(underlying->ctype.modifiers &
+					 MOD_UNSIGNED);
+				if (underlying == &bool_ctype)
+					sym->bit_size = bits_to_bytes(bits_in_bool) * bits_in_char;
+				else
+					sym->bit_size = underlying->bit_size;
+				sym->ctype.alignment =
+					underlying->ctype.alignment;
+				sym->rank = underlying->rank;
+			}
+			token = handle_attributes(token, &attr);
+			if (!match_op(token, '{')) {
+				ctx->opaque_fixed_enum = 1;
+				ctx->opaque_fixed_enum_pos = colon_pos;
+			}
+		} else if (type == SYM_ENUM && sym->fixed_type &&
+			   match_op(token, '{')) {
+			sparse_error(
+				token->pos,
+				"'enum' declared with but defined without fixed underlying type");
+		}
+
 		if (!match_op(token, '{')) {
 			if (attr.designated_init) {
 				if (sym->type == SYM_STRUCT)
@@ -814,11 +898,44 @@ static struct token *struct_union_enum_specifier(enum type type,
 
 		// Mark the structure as needing re-examination
 		sym->examined = 0;
-	} else if (match_op(token, '{')) {
+	} else if (match_op(token, '{') ||
+		   (type == SYM_ENUM && match_op(token, ':'))) {
 		// private struct/union/enum type
 		sym = alloc_symbol(token->pos, type);
 		set_current_scope(sym);		// used by dissect
 		ctx->ctype.base_type = sym;
+		if (type == SYM_ENUM && match_op(token, ':')) {
+			struct symbol *underlying = NULL;
+			if (standard < STANDARD_C23 && Wpedantic)
+				warning(token->pos,
+					"ISO C does not support specifying 'enum' underlying types before C23");
+			token = typename(token->next, &underlying, NULL);
+			underlying = examine_symbol_type(underlying);
+			if (!underlying || !is_int_type(underlying) ||
+			    is_enum_type(underlying)) {
+				sparse_error(token->pos,
+					     "invalid 'enum' underlying type");
+				underlying = &int_ctype;
+			}
+			underlying = canonical_enum_underlying_type(underlying);
+			sym->fixed_type = 1;
+			sym->ctype.base_type = underlying;
+			sym->ctype.modifiers |=
+				(underlying->ctype.modifiers & MOD_UNSIGNED);
+			if (underlying == &bool_ctype)
+				sym->bit_size = bits_to_bytes(bits_in_bool) * bits_in_char;
+			else
+				sym->bit_size = underlying->bit_size;
+			sym->ctype.alignment = underlying->ctype.alignment;
+			sym->rank = underlying->rank;
+			token = handle_attributes(token, &attr);
+			if (!match_op(token, '{')) {
+				sparse_error(
+					token->pos,
+					"expected '{' after enum type specifier");
+				return token;
+			}
+		}
 	} else {
 		sparse_error(token->pos, "expected declaration");
 		ctx->ctype.base_type = &bad_ctype;
@@ -941,8 +1058,8 @@ static struct range type_range(struct symbol *type)
 	long long min;
 
 	if (is_signed_type(type)) {
-		min = sign_bit(size);
-		max = min - 1;
+		min = sign_extend(sign_bit(size), size);
+		max = sign_mask(size);
 	} else {
 		min = 0;
 		max = bits_mask(size);
@@ -963,24 +1080,37 @@ static int val_in_range(struct range *range, long long sval, struct symbol *vtyp
 		return uval <= range->pos;
 }
 
-static void cast_enum_list(struct symbol_list *list, struct symbol *base_type)
+static void cast_enum_list(struct symbol_list *list, struct symbol *base_type,
+			   struct range range)
 {
 	struct range irange = type_range(&int_ctype);
+	struct symbol *target = base_type;
 	struct symbol *sym;
+
+	if (is_int_type(base_type) && range.neg >= irange.neg &&
+	    range.pos <= irange.pos)
+		target = &int_ctype;
 
 	FOR_EACH_PTR(list, sym) {
 		struct expression *expr = sym->initializer;
 		struct symbol *ctype;
-		long long val;
+		struct symbol *etype = target;
+
 		if (expr->type != EXPR_VALUE)
 			continue;
 		ctype = expr->ctype;
-		val = get_expression_value(expr);
-		if (is_int_type(ctype) && val_in_range(&irange, val, ctype)) {
-			expr->ctype = &int_ctype;
-			continue;
+		if (standard < STANDARD_C23 && etype != &int_ctype &&
+		    is_int_type(ctype)) {
+			long long val = get_expression_value(expr);
+
+			if (!(is_signed_type(ctype) && val < 0) &&
+			    (unsigned long long)val <= irange.pos)
+				etype = &int_ctype;
 		}
-		cast_value(expr, base_type, expr);
+		if (!is_int_type(ctype) && etype == &int_ctype)
+			continue;
+		cast_value(expr, etype, expr);
+		expr->ctype = etype;
 	} END_FOR_EACH_PTR(sym);
 }
 
@@ -992,13 +1122,16 @@ static struct token *parse_enum_declaration(struct token *token, struct symbol *
 	int mix_bitwise = 0;
 
 	parent->examined = 1;
-	parent->ctype.base_type = &int_ctype;
+	if (parent->fixed_type)
+		base_type = parent->ctype.base_type;
+	else
+		parent->ctype.base_type = &int_ctype;
 	while (token_type(token) == TOKEN_IDENT) {
 		struct expression *expr = NULL;
 		struct token *next = token->next;
 		struct decl_state ctx = { };
 		struct symbol *sym;
-		bool overflow = false;
+		bool overflowed = false;
 
 		// FIXME: only 'deprecated' should be accepted
 		next = handle_attributes(next, &ctx);
@@ -1016,7 +1149,7 @@ static struct token *parse_enum_declaration(struct token *token, struct symbol *
 				ctype = &int_ctype;
 			}
 		} else if (!ctype) {
-			ctype = &int_ctype;
+			ctype = parent->fixed_type ? base_type : &int_ctype;
 		} else if (is_int_type(ctype)) {
 			struct range crange = type_range(ctype);
 			if (is_signed_type(ctype) && (long long)lastval == crange.pos) {
@@ -1038,13 +1171,20 @@ static struct token *parse_enum_declaration(struct token *token, struct symbol *
 				else if (ctype->bit_size < bits_in_longlong)
 					ctype = &ullong_ctype;
 				else {
-					sparse_error(token->pos,
-						"enumerator value for '%s' overflows",
-						show_ident(token->ident));
-					overflow = true;
+					if (parent->fixed_type)
+						sparse_error(
+							token->pos,
+							"enumerator value outside the range of underlying type");
+					else
+						sparse_error(
+							token->pos,
+							"enumerator value for '%s' overflows",
+							show_ident(token->ident));
+					ctype = &ullong_ctype;
+					overflowed = true;
 				}
 			}
-			if (!overflow)
+			if (!overflowed)
 				lastval++;
 		} else {
 			error_die(token->pos, "can't increment the last enum member");
@@ -1056,6 +1196,16 @@ static struct token *parse_enum_declaration(struct token *token, struct symbol *
 			expr->ctype = ctype;
 		}
 
+		if (parent->fixed_type) {
+			struct range urange = type_range(base_type);
+			if (!overflowed && !val_in_range(&urange, lastval, ctype))
+				sparse_error(
+					token->pos,
+					"enumerator value outside the range of underlying type");
+			cast_value(expr, base_type, expr);
+			ctype = base_type;
+		}
+
 		sym = alloc_symbol(token->pos, SYM_NODE);
 		bind_symbol(sym, token->ident, NS_SYMBOL);
 		sym->ctype.modifiers &= ~MOD_ADDRESSABLE;
@@ -1064,7 +1214,7 @@ static struct token *parse_enum_declaration(struct token *token, struct symbol *
 		sym->ctype.base_type = parent;
 		add_ptr_list(&parent->symbol_list, sym);
 
-		if (base_type != &bad_ctype) {
+		if (!parent->fixed_type && base_type != &bad_ctype) {
 			if (ctype->type == SYM_NODE)
 				ctype = ctype->ctype.base_type;
 			if (ctype->type == SYM_ENUM) {
@@ -1104,7 +1254,7 @@ static struct token *parse_enum_declaration(struct token *token, struct symbol *
 			}
 			parent->ctype.base_type = base_type;
 		}
-		if (is_int_type(base_type)) {
+		if (!parent->fixed_type && is_int_type(base_type)) {
 			update_range(&range, lastval, ctype);
 		}
 		token = next;
@@ -1115,33 +1265,40 @@ static struct token *parse_enum_declaration(struct token *token, struct symbol *
 			break;
 		token = token->next;
 	}
-	if (!base_type) {
-		sparse_error(token->pos, "empty enum definition");
-		base_type = &bad_ctype;
-	}
-	else if (!is_int_type(base_type))
-		;
-	else if (type_is_ok(&uint_ctype, range))
-		base_type = &uint_ctype;
-	else if (type_is_ok(&int_ctype, range))
-		base_type = &int_ctype;
-	else if (type_is_ok(&ulong_ctype, range))
-		base_type = &ulong_ctype;
-	else if (type_is_ok(&long_ctype, range))
-		base_type = &long_ctype;
-	else if (type_is_ok(&ullong_ctype, range))
-		base_type = &ullong_ctype;
-	else if (type_is_ok(&llong_ctype, range))
-		base_type = &llong_ctype;
-	else
-		base_type = &bad_ctype;
-	parent->ctype.base_type = base_type;
-	parent->ctype.modifiers |= (base_type->ctype.modifiers & MOD_UNSIGNED);
-	parent->examined = 0;
+	if (!parent->fixed_type) {
+		if (!base_type) {
+			sparse_error(token->pos, "empty enum definition");
+			base_type = &bad_ctype;
+		} else if (!is_int_type(base_type))
+			;
+		else if (type_is_ok(&uint_ctype, range))
+			base_type = &uint_ctype;
+		else if (type_is_ok(&int_ctype, range))
+			base_type = &int_ctype;
+		else if (type_is_ok(&ulong_ctype, range))
+			base_type = &ulong_ctype;
+		else if (type_is_ok(&long_ctype, range))
+			base_type = &long_ctype;
+		else if (type_is_ok(&ullong_ctype, range))
+			base_type = &ullong_ctype;
+		else if (type_is_ok(&llong_ctype, range))
+			base_type = &llong_ctype;
+		else
+			base_type = &bad_ctype;
+		parent->ctype.base_type = base_type;
+		parent->ctype.modifiers |=
+			(base_type->ctype.modifiers & MOD_UNSIGNED);
+		parent->examined = 0;
 
-	if (mix_bitwise)
-		return token;
-	cast_enum_list(parent->symbol_list, base_type);
+		if (mix_bitwise)
+			return token;
+		cast_enum_list(parent->symbol_list, base_type, range);
+	} else {
+		if (!parent->symbol_list) {
+			sparse_error(token->pos, "empty enum definition");
+		}
+		parent->examined = 0;
+	}
 
 	return token;
 }
@@ -2130,6 +2287,9 @@ static struct token *declaration_list(struct token *token, struct symbol_list **
 	unsigned long mod;
 
 	token = declaration_specifiers(token, &ctx);
+	if (ctx.opaque_fixed_enum)
+		sparse_error(ctx.opaque_fixed_enum_pos,
+			     "'enum' underlying type may not be specified here");
 	mod = decl_modifiers(&ctx);
 	saved = ctx.ctype;
 	for (;;) {
@@ -2200,6 +2360,9 @@ static struct token *parameter_declaration(struct token *token, struct symbol *s
 	struct decl_state ctx = {.prefer_abstract = 1};
 
 	token = declaration_specifiers(token, &ctx);
+	if (ctx.opaque_fixed_enum)
+		sparse_error(ctx.opaque_fixed_enum_pos,
+			     "'enum' underlying type may not be specified here");
 	ctx.ident = &sym->ident;
 	token = declarator(token, &ctx);
 	token = handle_attributes(token, &ctx);
@@ -2240,6 +2403,9 @@ struct token *typename(struct token *token, struct symbol **p, int *forced)
 	token = declaration_specifiers(token, &ctx);
 	if (ctx.has_alignas)
 		sparse_error(sym->pos, "alignment specified for type name");
+	if (ctx.opaque_fixed_enum)
+		sparse_error(ctx.opaque_fixed_enum_pos,
+			     "'enum' underlying type may not be specified here");
 	if (ctx.autotype) {
 		sparse_error(sym->pos, "'%s' in type name",
 			     ctx.has_auto ? "auto" : "__auto_type");
@@ -3309,6 +3475,12 @@ struct token *external_declaration(struct token *token, struct symbol_list **lis
 	decl = alloc_symbol(token->pos, SYM_NODE);
 	/* Just a type declaration? */
 	if (match_op(token, ';')) {
+		if (ctx.opaque_fixed_enum &&
+		    (ctx.storage_class || (mod & ~MOD_UNUSED) ||
+		     ctx.ctype.modifiers || ctx.has_auto || ctx.is_constexpr))
+			sparse_error(
+				ctx.opaque_fixed_enum_pos,
+				"'enum' underlying type may not be specified here");
 		if (ctx.autotype)
 			sparse_error(token->pos, "%s in empty declaration",
 				     ctx.has_auto ? "auto" : "__auto_type");
@@ -3318,6 +3490,9 @@ struct token *external_declaration(struct token *token, struct symbol_list **lis
 		apply_modifiers(token->pos, &ctx);
 		return token->next;
 	}
+	if (ctx.opaque_fixed_enum)
+		sparse_error(ctx.opaque_fixed_enum_pos,
+			     "'enum' underlying type may not be specified here");
 
 	saved = ctx.ctype;
 	token = declarator(token, &ctx);

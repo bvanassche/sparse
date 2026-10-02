@@ -106,9 +106,20 @@ void cast_value(struct expression *expr, struct symbol *newtype, struct expressi
 	// For pointers and integers, we can just move the value around
 	expr->type = EXPR_VALUE;
 	expr->taint = old->taint;
-	if (old_size == new_size) {
+	if (old_size == new_size && !is_bool_type(newtype)) {
 		expr->value = old->value;
 		expr->ctype = newtype;
+		return;
+	}
+
+	if (is_bool_type(newtype)) {
+		bool non_zero = old->value != 0;
+		bool is_one = old->value == 1;
+		expr->ctype = newtype;
+		expr->value = non_zero;
+		if (!conservative && non_zero && !is_one)
+			warning(old->pos, "odd constant _Bool cast (%llx becomes 1)",
+				old->value);
 		return;
 	}
 
