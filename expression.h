@@ -175,7 +175,8 @@ struct expression {
 
 		// EXPR_STRING
 		struct {
-			int wide;
+			char wide;
+			char utf8;
 			struct string *string;
 		};
 

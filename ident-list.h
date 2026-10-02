@@ -54,8 +54,9 @@ IDENT(static_assert);
 IDENT(thread_local);
 IDENT(true);
 
-/* Special case for L'\t' */
+/* Special case for L'\t' and u8'a' */
 IDENT(L);
+IDENT(u8);
 
 /* Extended gcc identifiers */
 IDENT(asm); IDENT_RESERVED(__asm); IDENT_RESERVED(__asm__);

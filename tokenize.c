@@ -152,12 +152,16 @@ const char *show_string(const struct string *string)
 	return buffer;
 }
 
-static const char *show_char(const char *s, size_t len, char prefix, char delim)
+static const char *show_char(const char *s, size_t len, const char *prefix,
+			     char delim)
 {
-	static char buffer[MAX_STRING + 4];
+	static char buffer[MAX_STRING + 8];
 	char *p = buffer;
-	if (prefix)
-		*p++ = prefix;
+	if (prefix) {
+		size_t plen = strlen(prefix);
+		memcpy(p, prefix, plen);
+		p += plen;
+	}
 	*p++ = delim;
 	memcpy(p, s, len);
 	p += len;
@@ -166,13 +170,17 @@ static const char *show_char(const char *s, size_t len, char prefix, char delim)
 	return buffer;
 }
 
-static const char *quote_char(const char *s, size_t len, char prefix, char delim)
+static const char *quote_char(const char *s, size_t len, const char *prefix,
+			      char delim)
 {
-	static char buffer[2*MAX_STRING + 6];
+	static char buffer[2 * MAX_STRING + 8];
 	size_t i;
 	char *p = buffer;
-	if (prefix)
-		*p++ = prefix;
+	if (prefix) {
+		size_t plen = strlen(prefix);
+		memcpy(p, prefix, plen);
+		p += plen;
+	}
 	if (delim == '"')
 		*p++ = '\\';
 	*p++ = delim;
@@ -211,24 +219,35 @@ const char *show_token(const struct token *token)
 	case TOKEN_SPECIAL:
 		return show_special(token->special);
 
-	case TOKEN_CHAR: 
-		return show_char(token->string->data,
-			token->string->length - 1, 0, '\'');
+	case TOKEN_CHAR:
+		return show_char(token->string->data, token->string->length - 1,
+				 NULL, '\'');
 	case TOKEN_CHAR_EMBEDDED_0 ... TOKEN_CHAR_EMBEDDED_3:
 		return show_char(token->embedded,
-			token_type(token) - TOKEN_CHAR, 0, '\'');
-	case TOKEN_WIDE_CHAR: 
-		return show_char(token->string->data,
-			token->string->length - 1, 'L', '\'');
+				 token_type(token) - TOKEN_CHAR, NULL, '\'');
+	case TOKEN_WIDE_CHAR:
+		return show_char(token->string->data, token->string->length - 1,
+				 "L", '\'');
 	case TOKEN_WIDE_CHAR_EMBEDDED_0 ... TOKEN_WIDE_CHAR_EMBEDDED_3:
 		return show_char(token->embedded,
-			token_type(token) - TOKEN_WIDE_CHAR, 'L', '\'');
-	case TOKEN_STRING: 
-		return show_char(token->string->data,
-			token->string->length - 1, 0, '"');
-	case TOKEN_WIDE_STRING: 
-		return show_char(token->string->data,
-			token->string->length - 1, 'L', '"');
+				 token_type(token) - TOKEN_WIDE_CHAR, "L",
+				 '\'');
+	case TOKEN_UTF8_CHAR:
+		return show_char(token->string->data, token->string->length - 1,
+				 "u8", '\'');
+	case TOKEN_UTF8_CHAR_EMBEDDED_0 ... TOKEN_UTF8_CHAR_EMBEDDED_3:
+		return show_char(token->embedded,
+				 token_type(token) - TOKEN_UTF8_CHAR, "u8",
+				 '\'');
+	case TOKEN_STRING:
+		return show_char(token->string->data, token->string->length - 1,
+				 NULL, '"');
+	case TOKEN_WIDE_STRING:
+		return show_char(token->string->data, token->string->length - 1,
+				 "L", '"');
+	case TOKEN_UTF8_STRING:
+		return show_char(token->string->data, token->string->length - 1,
+				 "u8", '"');
 
 	case TOKEN_STREAMBEGIN:
 		snprintf(buffer, sizeof(buffer), "<beginning of '%s'>", stream_name(token->pos.stream));
@@ -273,24 +292,35 @@ const char *quote_token(const struct token *token)
 	case TOKEN_SPECIAL:
 		return show_special(token->special);
 
-	case TOKEN_CHAR: 
+	case TOKEN_CHAR:
 		return quote_char(token->string->data,
-			token->string->length - 1, 0, '\'');
+				  token->string->length - 1, NULL, '\'');
 	case TOKEN_CHAR_EMBEDDED_0 ... TOKEN_CHAR_EMBEDDED_3:
 		return quote_char(token->embedded,
-			token_type(token) - TOKEN_CHAR, 0, '\'');
-	case TOKEN_WIDE_CHAR: 
+				  token_type(token) - TOKEN_CHAR, NULL, '\'');
+	case TOKEN_WIDE_CHAR:
 		return quote_char(token->string->data,
-			token->string->length - 1, 'L', '\'');
+				  token->string->length - 1, "L", '\'');
 	case TOKEN_WIDE_CHAR_EMBEDDED_0 ... TOKEN_WIDE_CHAR_EMBEDDED_3:
 		return quote_char(token->embedded,
-			token_type(token) - TOKEN_WIDE_CHAR, 'L', '\'');
-	case TOKEN_STRING: 
+				  token_type(token) - TOKEN_WIDE_CHAR, "L",
+				  '\'');
+	case TOKEN_UTF8_CHAR:
 		return quote_char(token->string->data,
-			token->string->length - 1, 0, '"');
-	case TOKEN_WIDE_STRING: 
+				  token->string->length - 1, "u8", '\'');
+	case TOKEN_UTF8_CHAR_EMBEDDED_0 ... TOKEN_UTF8_CHAR_EMBEDDED_3:
+		return quote_char(token->embedded,
+				  token_type(token) - TOKEN_UTF8_CHAR, "u8",
+				  '\'');
+	case TOKEN_STRING:
 		return quote_char(token->string->data,
-			token->string->length - 1, 'L', '"');
+				  token->string->length - 1, NULL, '"');
+	case TOKEN_WIDE_STRING:
+		return quote_char(token->string->data,
+				  token->string->length - 1, "L", '"');
+	case TOKEN_UTF8_STRING:
+		return quote_char(token->string->data,
+				  token->string->length - 1, "u8", '"');
 	case TOKEN_GNU_KLUDGE:
 		return ",";
 	default:
@@ -978,6 +1008,14 @@ static int get_one_identifier(int c, stream_t *stream)
 			else
 				return eat_string(nextchar(stream), stream,
 							TOKEN_WIDE_STRING);
+		}
+		if (len == 2 && buf[0] == 'u' && buf[1] == '8') {
+			if (next == '\'')
+				return eat_string(nextchar(stream), stream,
+						  TOKEN_UTF8_CHAR);
+			else
+				return eat_string(nextchar(stream), stream,
+						  TOKEN_UTF8_STRING);
 		}
 	}
 	hash = ident_hash_end(hash);

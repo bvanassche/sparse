@@ -507,10 +507,17 @@ static enum token_type combine(struct token *left, struct token *right, char *p)
 		return TOKEN_ERROR;
 
 	if (t1 == TOKEN_IDENT && left->ident == &L_ident) {
-		if (t2 >= TOKEN_CHAR && t2 < TOKEN_WIDE_CHAR)
+		if (t2 >= TOKEN_CHAR && t2 <= TOKEN_CHAR_EMBEDDED_3)
 			return t2 + TOKEN_WIDE_CHAR - TOKEN_CHAR;
 		if (t2 == TOKEN_STRING)
 			return TOKEN_WIDE_STRING;
+	}
+
+	if (t1 == TOKEN_IDENT && left->ident == &u8_ident) {
+		if (t2 >= TOKEN_CHAR && t2 <= TOKEN_CHAR_EMBEDDED_3)
+			return t2 + TOKEN_UTF8_CHAR - TOKEN_CHAR;
+		if (t2 == TOKEN_STRING)
+			return TOKEN_UTF8_STRING;
 	}
 
 	if (t2 != TOKEN_IDENT && t2 != TOKEN_NUMBER && t2 != TOKEN_SPECIAL)
@@ -592,12 +599,15 @@ static int merge(struct token *left, struct token *right)
 
 	case TOKEN_WIDE_CHAR:
 	case TOKEN_WIDE_STRING:
+	case TOKEN_UTF8_CHAR:
+	case TOKEN_UTF8_STRING:
 		token_type(left) = res;
 		left->pos.noexpand = 0;
 		left->string = right->string;
 		return 1;
 
 	case TOKEN_WIDE_CHAR_EMBEDDED_0 ... TOKEN_WIDE_CHAR_EMBEDDED_3:
+	case TOKEN_UTF8_CHAR_EMBEDDED_0 ... TOKEN_UTF8_CHAR_EMBEDDED_3:
 		token_type(left) = res;
 		left->pos.noexpand = 0;
 		memcpy(left->embedded, right->embedded, 4);
@@ -620,7 +630,9 @@ static struct token *dup_token(const struct token *token, struct position *strea
 	alloc->pos.stream = pos.stream;
 	alloc->pos.line = pos.line;
 	alloc->pos.pos = pos.pos;
-	if (token_type(alloc) == TOKEN_STRING || token_type(alloc) == TOKEN_WIDE_STRING)
+	if (token_type(alloc) == TOKEN_STRING ||
+	    token_type(alloc) == TOKEN_WIDE_STRING ||
+	    token_type(alloc) == TOKEN_UTF8_STRING)
 		token->string->immutable = 1;
 	return alloc;	
 }
@@ -2165,12 +2177,15 @@ static int token_different(struct token *t1, struct token *t2)
 		break;
 	case TOKEN_CHAR_EMBEDDED_0 ... TOKEN_CHAR_EMBEDDED_3:
 	case TOKEN_WIDE_CHAR_EMBEDDED_0 ... TOKEN_WIDE_CHAR_EMBEDDED_3:
+	case TOKEN_UTF8_CHAR_EMBEDDED_0 ... TOKEN_UTF8_CHAR_EMBEDDED_3:
 		different = memcmp(t1->embedded, t2->embedded, 4);
 		break;
 	case TOKEN_CHAR:
 	case TOKEN_WIDE_CHAR:
+	case TOKEN_UTF8_CHAR:
 	case TOKEN_STRING:
-	case TOKEN_WIDE_STRING: {
+	case TOKEN_WIDE_STRING:
+	case TOKEN_UTF8_STRING: {
 		struct string *s1, *s2;
 
 		s1 = t1->string;
