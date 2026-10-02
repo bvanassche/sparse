@@ -840,6 +840,7 @@ static struct token *struct_union_enum_specifier(enum type type,
 				warning(token->pos,
 					"ISO C does not support specifying 'enum' underlying types before C23");
 			token = typename(token->next, &underlying, NULL);
+			check_typename_storage(underlying);
 			underlying = examine_symbol_type(underlying);
 			if (!underlying || !is_int_type(underlying) ||
 			    is_enum_type(underlying)) {
@@ -923,6 +924,7 @@ static struct token *struct_union_enum_specifier(enum type type,
 				warning(token->pos,
 					"ISO C does not support specifying 'enum' underlying types before C23");
 			token = typename(token->next, &underlying, NULL);
+			check_typename_storage(underlying);
 			underlying = examine_symbol_type(underlying);
 			if (!underlying || !is_int_type(underlying) ||
 			    is_enum_type(underlying)) {
@@ -1337,6 +1339,7 @@ static struct token *typeof_specifier_helper(struct token *token, struct symbol 
 	if (lookup_type(token->next)) {
 		struct symbol *sym;
 		token = typename(token->next, &sym, NULL);
+		check_typename_storage(sym);
 		sym = examine_symbol_type(sym);
 		if (!qual) {
 			sym->ctype.modifiers &= ~MOD_QUALIFIER;
@@ -1780,6 +1783,7 @@ static struct token *alignas_specifier(struct token *token, struct symbol *sym, 
 	if (lookup_type(token->next)) {
 		struct symbol *sym = NULL;
 		token = typename(token->next, &sym, NULL);
+		check_typename_storage(sym);
 		sym = examine_symbol_type(sym);
 		alignment = sym->ctype.alignment;
 		token = expect(token, ')', "after _Alignas(...");
@@ -2550,37 +2554,62 @@ static struct token *parameter_declaration(struct token *token, struct symbol *s
 	return token;
 }
 
+void check_typename_storage(struct symbol *sym)
+{
+	struct symbol *base;
+	unsigned long class;
+	if (!sym)
+		return;
+	for (base = sym; base && (base->type == SYM_NODE ||
+				  base->type == SYM_PTR ||
+				  base->type == SYM_ARRAY);
+	     base = base->ctype.base_type)
+		;
+	if (base == &autotype_ctype) {
+		sparse_error(sym->pos, "'%s' in type name",
+			     sym->c23_auto ? "auto" : "__auto_type");
+		sym->ctype.base_type = &bad_ctype;
+		return;
+	}
+	if (sym->has_alignas)
+		sparse_error(sym->pos, "alignment specified for type name");
+	if (sym->ctype.modifiers & MOD_CONSTEXPR)
+		sparse_error(sym->pos, "constexpr in typename");
+	class = sym->ctype.modifiers & (MOD_STORAGE | MOD_TLS);
+	if (class)
+		warning(sym->pos, "storage class in typename (%s%s)",
+			modifier_string(class), show_typename(sym));
+}
+
 struct token *typename(struct token *token, struct symbol **p, int *forced)
 {
-	struct decl_state ctx = {.prefer_abstract = 1};
-	unsigned long class;
+	struct decl_state ctx = { .prefer_abstract = 1 };
 	struct symbol *sym = alloc_symbol(token->pos, SYM_NODE);
+	unsigned long mod;
 	*p = sym;
 	token = declaration_specifiers(token, &ctx);
-	if (ctx.has_alignas)
-		sparse_error(sym->pos, "alignment specified for type name");
+	mod = decl_modifiers(&ctx);
 	if (ctx.opaque_fixed_enum)
 		sparse_error(ctx.opaque_fixed_enum_pos,
 			     "'enum' underlying type may not be specified here");
-	if (ctx.autotype) {
-		sparse_error(sym->pos, "'%s' in type name",
-			     ctx.has_auto ? "auto" : "__auto_type");
-		ctx.ctype.base_type = &bad_ctype;
-	}
 	token = declarator(token, &ctx);
 	token = handle_attributes(token, &ctx);
 	ctx.ctype.modifiers |= ctx.ident_modifiers;
 	apply_modifiers(token->pos, &ctx);
 	sym->ctype = ctx.ctype;
+	sym->c23_auto = ctx.autotype && ctx.has_auto;
 	sym->endpos = token->pos;
-	if (ctx.is_constexpr)
-		sparse_error(sym->pos, "constexpr in typename");
-	class = ctx.storage_class;
+	if (ctx.storage_class == MOD_USERTYPE)
+		sym->explicit_typedef = 1;
+	if (ctx.has_alignas)
+		sym->has_alignas = 1;
+	if (ctx.is_constexpr) {
+		apply_constexpr_const(sym);
+		sym->ctype.modifiers |= MOD_CONSTEXPR;
+	}
+	sym->ctype.modifiers |= mod | decl_modifiers(&ctx);
 	if (forced)
 		*forced = ctx.forced;
-	if (class)
-		warning(sym->pos, "storage class in typename (%s%s)",
-			modifier_string(class), show_typename(sym));
 	return token;
 }
 

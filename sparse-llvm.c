@@ -318,7 +318,7 @@ static LLVMValueRef get_sym_value(LLVMModuleRef module, struct symbol *sym)
 	LLVMValueRef result = NULL;
 	struct expression *expr;
 
-	assert(sym->bb_target == NULL);
+	assert(sym->namespace != NS_LABEL);
 
 	expr = sym->initializer;
 	if (expr && !sym->ident) {
@@ -346,6 +346,14 @@ static LLVMValueRef get_sym_value(LLVMModuleRef module, struct symbol *sym)
 		default:
 			break;
 		}
+	}
+
+	if (!sym->ident && (sym->ctype.modifiers & (MOD_STATIC | MOD_TOPLEVEL | MOD_TLS))) {
+		if (!sym->aux) {
+			expand_symbol(sym);
+			sym->aux = output_data(module, sym);
+		}
+		return sym->aux;
 	}
 
 	if (LLVMGetTypeKind(type) == LLVMFunctionTypeKind) {
