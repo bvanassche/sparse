@@ -2241,9 +2241,14 @@ static enum kind which_func(struct token *token,
 		if (lookup_type(next) || next != token->next)
 			return Proto;
 		/* identifier list not in definition; complain */
-		if (prefer_abstract)
-			warning(token->pos,
-				"identifier list not in definition");
+		if (prefer_abstract || !n) {
+			if (standard >= STANDARD_C23)
+				sparse_error(token->pos,
+					     "identifier list not in definition");
+			else
+				warning(token->pos,
+					"identifier list not in definition");
+		}
 		return K_R;
 	}
 
@@ -2251,6 +2256,8 @@ static enum kind which_func(struct token *token,
 		return Bad_Func;
 
 	if (next->special == ')') {
+		if (standard >= STANDARD_C23)
+			return Proto;
 		/* don't complain about those */
 		if (!n || match_op(next->next, ';') || match_op(next->next, ','))
 			return Empty;
@@ -3284,6 +3291,7 @@ static struct token * statement_list(struct token *token, struct statement_list 
 static struct token *identifier_list(struct token *token, struct symbol *fn)
 {
 	struct symbol_list **list = &fn->arguments;
+	fn->kr_args = 1;
 	for (;;) {
 		struct symbol *sym = alloc_symbol(token->pos, SYM_NODE);
 		sym->ident = token->ident;
@@ -3303,6 +3311,9 @@ static struct token *identifier_list(struct token *token, struct symbol *fn)
 static struct token *parameter_type_list(struct token *token, struct symbol *fn)
 {
 	struct symbol_list **list = &fn->arguments;
+
+	if (match_op(token, ')'))
+		return token;
 
 	for (;;) {
 		struct symbol *sym;
@@ -3602,7 +3613,10 @@ static struct token *parse_k_r_arguments(struct token *token, struct symbol *dec
 {
 	struct symbol_list *args = NULL;
 
-	if (Wold_style_definition)
+	if (standard >= STANDARD_C23)
+		sparse_error(token->pos,
+			     "old-style function definition is invalid in C23");
+	else if (Wold_style_definition)
 		warning(token->pos, "non-ANSI definition of function '%s'", show_ident(decl->ident));
 
 	do {
@@ -3772,8 +3786,15 @@ struct token *external_declaration(struct token *token, struct symbol_list **lis
 		}
 		if (lookup_type(token))
 			return parse_k_r_arguments(token, decl, list);
-		if (match_op(token, '{'))
+		if (match_op(token, '{')) {
+			if (standard >= STANDARD_C23 && base_type->kr_args)
+				sparse_error(decl->pos,
+					     "old-style function definition is invalid in C23");
 			return parse_function_body(token, decl, list);
+		}
+		if (standard >= STANDARD_C23 && base_type->kr_args)
+			sparse_error(decl->pos,
+				     "identifier list not in function definition");
 
 		if (!(decl->ctype.modifiers & MOD_STATIC))
 			decl->ctype.modifiers |= MOD_EXTERN;
@@ -3977,6 +3998,9 @@ struct token *external_declaration(struct token *token, struct symbol_list **lis
 		base_type = decl->ctype.base_type;
 		if (!is_typedef && base_type && base_type->type == SYM_FN) {
 			decl->ctype.modifiers |= ctx.f_modifiers;
+			if (standard >= STANDARD_C23 && base_type->kr_args)
+				sparse_error(decl->pos,
+					     "identifier list not in function definition");
 			if (!(decl->ctype.modifiers & MOD_STATIC))
 				decl->ctype.modifiers |= MOD_EXTERN;
 		}
