@@ -658,6 +658,7 @@ void init_parser_finalize(void)
 		alignof_ident.reserved = 1;
 		true_ident.reserved = 1;
 		false_ident.reserved = 1;
+		nullptr_ident.reserved = 1;
 	}
 }
 
@@ -1006,6 +1007,12 @@ static struct token *parse_enum_declaration(struct token *token, struct symbol *
 			ctype = &void_ctype;
 			if (expr && expr->ctype)
 				ctype = expr->ctype;
+			if (is_nullptr_type(ctype)) {
+				sparse_error(expr->pos,
+					     "enumerator value for '%s' is not an integer constant",
+					     show_ident(token->ident));
+				ctype = &int_ctype;
+			}
 		} else if (!ctype) {
 			ctype = &int_ctype;
 		} else if (is_int_type(ctype)) {

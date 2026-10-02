@@ -857,6 +857,8 @@ const char *type_difference(struct ctype *c1, struct ctype *c2,
 				return "different address spaces";
 			if (base1 != base2)
 				return "different base types";
+			if (!base1 && t1->bit_size != t2->bit_size)
+				return "different base types";
 			if (t1->rank != t2->rank)
 				return "different type sizes";
 			diff = (mod1 ^ mod2) & ~MOD_IGNORE;
@@ -1106,7 +1108,11 @@ enum null_constant_type {
 
 static inline int is_null_pointer_constant(struct expression *e)
 {
-	if (e->ctype == &null_ctype)
+	if (e->ctype == &null_ctype ||
+	    (e->ctype && e->ctype->type == SYM_NODE && e->ctype->ctype.base_type == &null_ctype))
+		return NULL_PTR;
+	if (is_nullptr_type(e->ctype) &&
+	    (e->type == EXPR_VALUE || (e->flags & CEF_ADDR)))
 		return NULL_PTR;
 	if (!(e->flags & CEF_ICE))
 		return NON_NULL;
@@ -1146,6 +1152,87 @@ static struct symbol *evaluate_compare(struct expression *expr)
 		if (ctype->ctype.modifiers & MOD_UNSIGNED)
 			expr->op = modify_for_unsigned(expr->op);
 		goto OK;
+	}
+
+	/* nullptr_t equality comparisons [C23 6.5.9] */
+	if (ltype == &nullptr_ctype || rtype == &nullptr_ctype) {
+		int is_null1, is_null2;
+
+		if (expr->op != SPECIAL_EQUAL && expr->op != SPECIAL_NOTEQUAL)
+			return bad_expr_type(expr);
+
+		is_null1 = is_null_pointer_constant(left);
+		is_null2 = is_null_pointer_constant(right);
+		if (ltype == &nullptr_ctype && rtype == &nullptr_ctype) {
+			if (is_null1 && is_null2) {
+				expr->type = EXPR_VALUE;
+				expr->value = (expr->op == SPECIAL_EQUAL);
+				expr->flags |= CEF_ACE;
+			}
+			goto OK;
+		}
+		if (ltype == &nullptr_ctype) {
+			if (rclass & TYPE_PTR) {
+				if (is_null1 && is_null2) {
+					if (is_null2 == NULL_ZERO)
+						bad_null(right);
+					expr->type = EXPR_VALUE;
+					expr->value = (expr->op == SPECIAL_EQUAL);
+					expr->flags |= CEF_ACE;
+					goto OK;
+				}
+				if (rtype == &null_ctype) {
+					expr->left = cast_to(left, &ptr_ctype);
+					expr->right = cast_to(right, &ptr_ctype);
+				} else {
+					expr->left = cast_to(left, rtype);
+				}
+				goto OK;
+			}
+			if (is_null2) {
+				if (is_null2 == NULL_ZERO)
+					bad_null(right);
+				if (is_null1) {
+					expr->type = EXPR_VALUE;
+					expr->value = (expr->op == SPECIAL_EQUAL);
+					expr->flags |= CEF_ACE;
+				} else {
+					expr->right = cast_to(right, &nullptr_ctype);
+				}
+				goto OK;
+			}
+			return bad_expr_type(expr);
+		}
+		if (lclass & TYPE_PTR) {
+			if (is_null1 && is_null2) {
+				if (is_null1 == NULL_ZERO)
+					bad_null(left);
+				expr->type = EXPR_VALUE;
+				expr->value = (expr->op == SPECIAL_EQUAL);
+				expr->flags |= CEF_ACE;
+				goto OK;
+			}
+			if (ltype == &null_ctype) {
+				expr->left = cast_to(left, &ptr_ctype);
+				expr->right = cast_to(right, &ptr_ctype);
+			} else {
+				expr->right = cast_to(right, ltype);
+			}
+			goto OK;
+		}
+		if (is_null1) {
+			if (is_null1 == NULL_ZERO)
+				bad_null(left);
+			if (is_null2) {
+				expr->type = EXPR_VALUE;
+				expr->value = (expr->op == SPECIAL_EQUAL);
+				expr->flags |= CEF_ACE;
+			} else {
+				expr->left = cast_to(left, &nullptr_ctype);
+			}
+			goto OK;
+		}
+		return bad_expr_type(expr);
 	}
 
 	/* at least one must be a pointer */
@@ -1274,6 +1361,29 @@ static struct symbol *evaluate_conditional_expression(struct expression *expr)
 		*cond = cast_to(*cond, ctype);
 		expr->cond_false = cast_to(expr->cond_false, ctype);
 		goto out;
+	}
+
+	if (ltype == &nullptr_ctype || rtype == &nullptr_ctype) {
+		if (ltype == &nullptr_ctype && rtype == &nullptr_ctype) {
+			ctype = &nullptr_ctype;
+			goto out;
+		}
+		if (ltype == &nullptr_ctype && (rclass & TYPE_PTR)) {
+			ctype = (rtype == &null_ctype) ? &ptr_ctype : rtype;
+			*cond = cast_to(*cond, ctype);
+			if (rtype == &null_ctype)
+				expr->cond_false = cast_to(expr->cond_false, ctype);
+			goto out;
+		}
+		if (rtype == &nullptr_ctype && (lclass & TYPE_PTR)) {
+			ctype = (ltype == &null_ctype) ? &ptr_ctype : ltype;
+			if (ltype == &null_ctype)
+				*cond = cast_to(*cond, ctype);
+			expr->cond_false = cast_to(expr->cond_false, ctype);
+			goto out;
+		}
+		typediff = "different types";
+		goto Err;
 	}
 
 	if ((lclass | rclass) & TYPE_PTR) {
@@ -1486,6 +1596,20 @@ static int check_assignment_types(struct symbol *target, struct expression **rp,
 	int tclass = classify_type(target, &t);
 	int sclass = classify_type(source, &s);
 
+	if (t == &nullptr_ctype) {
+		int is_null;
+		if (s == &nullptr_ctype)
+			return 1;
+		is_null = is_null_pointer_constant(*rp);
+		if (is_null) {
+			if (is_null == NULL_ZERO)
+				bad_null(*rp);
+			goto Cast;
+		}
+		*typediff = "different base types";
+		return 0;
+	}
+
 	if (tclass & sclass & TYPE_NUM) {
 		if (tclass & TYPE_RESTRICT) {
 			/* allowed assignments unfoul */
@@ -1518,7 +1642,18 @@ static int check_assignment_types(struct symbol *target, struct expression **rp,
 				bad_null(*rp);
 			goto Cast;
 		}
+		if (s == &nullptr_ctype) {
+			if (t == &null_ctype) {
+				*typediff = "different base types";
+				return 0;
+			}
+			goto Cast;
+		}
 		if (!(sclass & TYPE_PTR)) {
+			*typediff = "different base types";
+			return 0;
+		}
+		if (t == &null_ctype && s != &null_ctype) {
 			*typediff = "different base types";
 			return 0;
 		}
@@ -1566,7 +1701,7 @@ static int check_assignment_types(struct symbol *target, struct expression **rp,
 
 	if (tclass & TYPE_NUM) {
 		/* XXX: need to turn into comparison with NULL */
-		if (is_bool_type(t) && (sclass & TYPE_PTR))
+		if (is_bool_type(t) && ((sclass & TYPE_PTR) || s == &nullptr_ctype))
 			goto Cast;
 		*typediff = "different base types";
 		return 0;
@@ -2067,9 +2202,13 @@ static struct symbol *evaluate_preop(struct expression *expr)
 		expr->flags = expr->unop->flags & ~CEF_CONST_MASK;
 		/*
 		 * A logical negation never yields an address constant
-		 * [6.6(9)].
+		 * [6.6(9)], though negating an address constant yields
+		 * an arithmetic constant expression.
 		 */
-		expr->flags &= ~CEF_ADDR;
+		if (expr->unop->flags & CEF_ADDR) {
+			expr->flags &= ~CEF_ADDR;
+			expr->flags |= CEF_ACE;
+		}
 
 		if (is_safe_type(ctype))
 			warning(expr->pos, "testing a 'safe expression'");
@@ -2474,6 +2613,8 @@ int evaluate_arguments(struct symbol_list *argtypes, struct expression_list *hea
 					*p = cast_to(expr, &ptr_ctype);
 				else
 					degenerate(expr);
+			} else if (type == &nullptr_ctype) {
+				degenerate(expr);
 			}
 		} else if (!target->forced_arg){
 			static char where[30];
@@ -2984,6 +3125,14 @@ static struct symbol *cast_to_bool(struct expression *expr)
 		return NULL;
 
 	zero = alloc_const_expression(expr->pos, 0);
+	if (otype == &nullptr_ctype) {
+		zero->ctype = otype;
+		expr->op = SPECIAL_NOTEQUAL;
+		expr->type = EXPR_COMPARE;
+		expr->left = old;
+		expr->right = zero;
+		return expr->ctype;
+	}
 	if (oclass & TYPE_PTR)
 		zero->ctype = otype;
 	expr->op = SPECIAL_NOTEQUAL;
@@ -3030,7 +3179,7 @@ static int cast_flags(struct expression *expr, struct expression *old)
 		 */
 		else if (old->flags & CEF_FLOAT)
 			flags = CEF_SET_ICE;
-	} else if (class & TYPE_PTR) {
+	} else if ((class & TYPE_PTR) || t == &nullptr_ctype) {
 		/*
 		 * Casts of integer literals to pointer type yield
 		 * address constants [6.6(9)].
@@ -3144,6 +3293,19 @@ static struct symbol *evaluate_cast(struct expression *expr)
 
 	if (expr->type == EXPR_FORCE_CAST)
 		goto out;
+
+	if (ttype == &nullptr_ctype) {
+		if (stype != &nullptr_ctype && !is_null_pointer_constant(source))
+			expression_error(expr, "conversion from '%s' to 'nullptr_t'",
+					 show_typename(source->ctype));
+		goto out;
+	}
+	if (stype == &nullptr_ctype) {
+		if (!is_bool_type(ttype) && tclass != TYPE_PTR)
+			expression_error(expr, "conversion from 'nullptr_t' to '%s'",
+					 show_typename(ctype));
+		goto out;
+	}
 
 	if (tclass & (TYPE_COMPOUND | TYPE_FN)) {
 		/*
@@ -3471,8 +3633,13 @@ static struct symbol *evaluate_generic_selection(struct expression *expr)
 		return NULL;
 	}
 
-	source = *ctrl;
-	source.ctype.modifiers &= ~(MOD_QUALIFIER|MOD_ATOMIC);
+	struct symbol *sel_ctrl = ctrl;
+
+	if (ctrl->ctype.modifiers & (MOD_QUALIFIER|MOD_ATOMIC)) {
+		source = *ctrl;
+		source.ctype.modifiers &= ~(MOD_QUALIFIER|MOD_ATOMIC);
+		sel_ctrl = &source;
+	}
 	for (map = expr->map; map; map = map->next) {
 		struct symbol *stype = map->type;
 		struct symbol *base;
@@ -3509,7 +3676,7 @@ static struct symbol *evaluate_generic_selection(struct expression *expr)
 			sparse_error(stype->pos, "incomplete type in generic selection");
 			continue;
 		}
-		if (!type_selection(&source, stype))
+		if (!type_selection(sel_ctrl, stype))
 			continue;
 
 		res = map->expr;
@@ -4009,6 +4176,9 @@ static void evaluate_switch_statement(struct statement *stmt)
 	evaluate_statement(stmt->switch_statement);
 	if (!sel)
 		return;
+	if (valid_type(sel->ctype) && !is_int_type(sel->ctype) &&
+	    !is_restricted_type(sel->ctype) && !is_fouled_type(sel->ctype))
+		expression_error(sel, "switch quantity is not an integer");
 	if (sel->ctype && is_enum_type(sel->ctype))
 		enumcase_holder = NULL; /* Only check cases against switch */
 

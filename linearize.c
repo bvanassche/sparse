@@ -1276,6 +1276,8 @@ retry:	switch (s->type) {
 	case_int:
 		return sign ? MTYPE_SINT : MTYPE_UINT;
 	case SYM_BASETYPE:
+		if (s == &nullptr_ctype)
+			return MTYPE_VPTR;
 		if (s->ctype.base_type == &fp_type)
 			return MTYPE_FLOAT;
 		if (s->ctype.base_type == &int_type)
