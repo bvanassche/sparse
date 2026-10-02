@@ -48,6 +48,7 @@ IDENT(alignas);
 IDENT(alignof);
 IDENT(bool);
 IDENT(false);
+IDENT(nullptr);
 IDENT(static_assert);
 IDENT(thread_local);
 IDENT(true);

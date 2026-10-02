@@ -154,6 +154,9 @@ static LLVMTypeRef sym_basetype_type(struct symbol *sym)
 {
 	LLVMTypeRef ret = NULL;
 
+	if (sym == &nullptr_ctype)
+		return LLVMPointerType(LLVMInt8TypeInContext(context), 0);
+
 	if (is_float_type(sym)) {
 		switch (sym->bit_size) {
 		case 32:
@@ -458,12 +461,17 @@ static LLVMValueRef value_to_ivalue(struct function *fn, struct symbol *ctype, L
 	return val;
 }
 
+static inline bool is_llvm_ptr_type(struct symbol *type)
+{
+	return is_ptr_type(type) || is_nullptr_type(type);
+}
+
 static LLVMValueRef value_to_pvalue(struct function *fn, struct symbol *ctype, LLVMValueRef val)
 {
 	const char *name = LLVMGetValueName(val);
 	LLVMTypeRef dtype = symbol_type(ctype);
 
-	assert(is_ptr_type(ctype));
+	assert(is_llvm_ptr_type(ctype));
 	switch (LLVMGetTypeKind(LLVMTypeOf(val))) {
 	case LLVMIntegerTypeKind:
 		val = LLVMBuildIntToPtr(fn->builder, val, dtype, name);
@@ -481,7 +489,7 @@ static LLVMValueRef adjust_type(struct function *fn, struct symbol *ctype, LLVMV
 {
 	if (is_int_type(ctype))
 		return value_to_ivalue(fn, ctype, val);
-	if (is_ptr_type(ctype))
+	if (is_llvm_ptr_type(ctype))
 		return value_to_pvalue(fn, ctype, val);
 	return val;
 }
@@ -901,18 +909,18 @@ static void output_op_ptrcast(struct function *fn, struct instruction *insn)
 	case OP_UTPTR:
 	case OP_SEXT:			// FIXME
 		assert(is_int_type(otype));
-		assert(is_ptr_type(insn->type));
+		assert(is_llvm_ptr_type(insn->type));
 		op = LLVMIntToPtr;
 		break;
 	case OP_PTRTU:
-		assert(is_ptr_type(otype));
+		assert(is_llvm_ptr_type(otype));
 		assert(is_int_type(insn->type));
 		op = LLVMPtrToInt;
 		break;
 	case OP_PTRCAST:
 	case OP_ZEXT:			// FIXME
-		assert(is_ptr_type(otype));
-		assert(is_ptr_type(insn->type));
+		assert(is_llvm_ptr_type(otype));
+		assert(is_llvm_ptr_type(insn->type));
 		op = LLVMBitCast;
 		break;
 	default:
@@ -930,7 +938,7 @@ static void output_op_cast(struct function *fn, struct instruction *insn, LLVMOp
 	struct symbol *otype = insn->orig_type;
 	char target_name[64];
 
-	if (is_ptr_type(insn->type))	// cast to void* is OP_CAST ...
+	if (is_llvm_ptr_type(insn->type))	// cast to void* is OP_CAST ...
 		return output_op_ptrcast(fn, insn);
 
 	assert(is_int_type(insn->type));
@@ -939,7 +947,7 @@ static void output_op_cast(struct function *fn, struct instruction *insn, LLVMOp
 	pseudo_name(insn->target, target_name);
 
 	dtype = symbol_type(insn->type);
-	if (is_ptr_type(otype)) {
+	if (is_llvm_ptr_type(otype)) {
 		op = LLVMPtrToInt;
 	} else if (is_float_type(otype)) {
 		assert(op == LLVMFPToUI || op == LLVMFPToSI);
@@ -1252,7 +1260,7 @@ static LLVMValueRef output_data(LLVMModuleRef module, struct symbol *sym)
 	if (initializer) {
 		switch (initializer->type) {
 		case EXPR_VALUE:
-			initial_value = LLVMConstInt(symbol_type(sym), initializer->value, 1);
+			initial_value = constant_value(initializer->value, symbol_type(sym));
 			break;
 		case EXPR_FVALUE:
 			initial_value = LLVMConstReal(symbol_type(sym), initializer->fvalue);

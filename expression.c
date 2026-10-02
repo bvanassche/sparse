@@ -480,6 +480,16 @@ struct token *primary_expression(struct token *token, struct expression **tree)
 			break;
 		}
 
+		if (standard >= STANDARD_C23 &&
+		    token->ident == &nullptr_ident) {
+			expr = alloc_expression(token->pos, EXPR_VALUE);
+			expr->flags = CEF_ADDR;
+			expr->ctype = &nullptr_ctype;
+			expr->value = 0;
+			token = next;
+			break;
+		}
+
 		sym = lookup_symbol(token->ident, NS_SYMBOL | NS_TYPEDEF);
 
 		if (!sym) {

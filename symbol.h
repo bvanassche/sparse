@@ -306,7 +306,7 @@ extern struct symbol	bool_ctype, void_ctype, type_ctype,
 			float_ctype, double_ctype, ldouble_ctype,
 			string_ctype, ptr_ctype, lazy_ptr_ctype,
 			incomplete_ctype, label_ctype, bad_ctype,
-			null_ctype;
+			null_ctype, nullptr_ctype;
 extern struct symbol	autotype_ctype;
 extern struct symbol	schar_ptr_ctype, short_ptr_ctype;
 extern struct symbol	int_ptr_ctype, uint_ptr_ctype;
@@ -487,6 +487,13 @@ static inline int is_bool_type(struct symbol *type)
 	return type == &bool_ctype;
 }
 
+static inline int is_nullptr_type(const struct symbol *type)
+{
+	if (type && type->type == SYM_NODE)
+		type = type->ctype.base_type;
+	return type == &nullptr_ctype;
+}
+
 static inline int is_scalar_type(struct symbol *type)
 {
 	if (type->type == SYM_NODE)
@@ -504,6 +511,8 @@ static inline int is_scalar_type(struct symbol *type)
 	if (type->ctype.base_type == &int_type)
 		return 1;
 	if (type->ctype.base_type == &fp_type)
+		return 1;
+	if (type == &nullptr_ctype)
 		return 1;
 	return 0;
 }
@@ -523,6 +532,8 @@ static inline bool is_integral_type(struct symbol *type)
 		break;
 	}
 	if (type->ctype.base_type == &int_type)
+		return 1;
+	if (type == &nullptr_ctype)
 		return 1;
 	return 0;
 }

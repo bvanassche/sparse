@@ -307,7 +307,14 @@ static struct symbol * examine_array_type(struct symbol *sym)
 		unsigned long count = get_expression_value_silent(array_size);
 		if (base_type->bit_size >= 0)
 			bit_size = array_element_offset(base_type->bit_size, count);
-		if (array_size->type != EXPR_VALUE) {
+		if (valid_type(array_size->ctype) &&
+		    !is_int_type(array_size->ctype) &&
+		    !is_restricted_type(array_size->ctype) &&
+		    !is_fouled_type(array_size->ctype)) {
+			sparse_error(array_size->pos,
+				     "size of array has non-integer type");
+			bit_size = 0;
+		} else if (array_size->type != EXPR_VALUE) {
 			if (Wvla)
 				warning(array_size->pos, "Variable length array is used.");
 			bit_size = -1;
@@ -875,7 +882,7 @@ struct symbol	bool_ctype, void_ctype, type_ctype,
 		float_ctype, double_ctype, ldouble_ctype,
 		string_ctype, ptr_ctype, lazy_ptr_ctype,
 		incomplete_ctype, label_ctype, bad_ctype,
-		null_ctype;
+		null_ctype, nullptr_ctype;
 struct symbol	autotype_ctype;
 struct symbol	schar_ptr_ctype, short_ptr_ctype;
 struct symbol	int_ptr_ctype, uint_ptr_ctype;
@@ -942,6 +949,7 @@ static const struct ctype_declare {
 	{ &incomplete_ctype,   T_BASETYPE },
 	{ &autotype_ctype,     T_BASETYPE },
 	{ &bad_ctype,          T_BASETYPE },
+	{ &nullptr_ctype,      SYM_BASETYPE, 0, 0, &bits_in_pointer, &pointer_alignment, NULL },
 
 	{ &char_ctype,         T__INT(-2, char) },
 	{ &schar_ctype,        T_SINT(-2, char) },
