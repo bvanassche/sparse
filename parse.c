@@ -50,6 +50,13 @@ struct statement_list *function_computed_goto_list;
 
 static struct token *statement(struct token *token, struct statement **tree);
 static struct token *handle_attributes(struct token *token, struct decl_state *ctx);
+static inline bool match_c23_attribute(struct token *token)
+{
+	return match_op(token, '[') && match_op(token->next, '[');
+}
+static struct token *c23_attribute_specifier(struct token *token,
+					     struct decl_state *ctx);
+static struct token *skip_c23_attributes(struct token *token);
 static struct token *skip_attributes(struct token *token);
 
 typedef struct token *declarator_t(struct token *, struct symbol *, struct decl_state *);
@@ -563,6 +570,7 @@ static struct init_keyword {
 	D("noderef",		&attr_mod_op,		.mods = MOD_NODEREF),
 	D("safe",		&attr_mod_op,		.mods = MOD_SAFE),
 	D("unused",		&attr_mod_op,		.mods = MOD_UNUSED),
+	D("maybe_unused",	&attr_mod_op,		.mods = MOD_UNUSED),
 	D("externally_visible",	&attr_mod_op,		.mods = MOD_EXT_VISIBLE),
 	D("force",		&attr_force_op),
 	D("bitwise",		&attr_bitwise_op,	.mods = MOD_BITWISE),
@@ -570,9 +578,14 @@ static struct init_keyword {
 	D("designated_init",	&designated_init_op),
 	D("transparent_union",	&transparent_union_op),
 	D("noreturn",		&attr_fun_op,		.mods = MOD_NORETURN),
+	D("_Noreturn",		&attr_fun_op,		.mods = MOD_NORETURN),
 	D("pure",		&attr_fun_op,		.mods = MOD_PURE),
 	A("const",		&attr_fun_op,		.mods = MOD_PURE),
 	D("gnu_inline",		&attr_fun_op,		.mods = MOD_GNU_INLINE),
+	D("nodiscard",		&ignore_attr_op),
+	D("fallthrough",	&ignore_attr_op),
+	D("unsequenced",	&attr_fun_op,		.mods = MOD_PURE),
+	D("reproducible",	&attr_fun_op,		.mods = MOD_PURE),
 
 	/* Modes */
 	D("mode",		&mode_op),
@@ -1666,20 +1679,27 @@ static struct token *attribute_transparent_union(struct token *token, struct sym
 	return token;
 }
 
-static struct token *recover_unknown_attribute(struct token *token)
+static struct token *skip_parens(struct token *token)
 {
-	struct expression *expr = NULL;
-
-	if (Wunknown_attribute)
-		warning(token->pos, "unknown attribute '%s'", show_ident(token->ident));
-	token = token->next;
 	if (match_op(token, '(')) {
-		if (match_op(token->next, ')'))
-			token = token->next->next;
-		else
-			token = parens_expression(token, &expr, "in attribute");
+		int depth = 1;
+		token = token->next;
+		while (depth && !eof_token(token)) {
+			if (match_op(token, '('))
+				depth++;
+			else if (match_op(token, ')'))
+				depth--;
+			token = token->next;
+		}
 	}
 	return token;
+}
+
+static struct token *recover_unknown_attribute(struct token *token)
+{
+	if (Wunknown_attribute)
+		warning(token->pos, "unknown attribute '%s'", show_ident(token->ident));
+	return skip_parens(token->next);
 }
 
 static struct token *attribute_specifier(struct token *token, struct symbol *sym, struct decl_state *ctx)
@@ -1863,7 +1883,11 @@ struct symbol *ctype_integer(int size, int want_unsigned)
 
 static struct token *handle_qualifiers(struct token *t, struct decl_state *ctx)
 {
-	while (token_type(t) == TOKEN_IDENT) {
+	while (token_type(t) == TOKEN_IDENT || match_c23_attribute(t)) {
+		if (match_c23_attribute(t)) {
+			t = c23_attribute_specifier(t, ctx);
+			continue;
+		}
 		struct symbol *s = lookup_keyword(t->ident, NS_TYPEDEF);
 		if (!s || !s->op)
 			break;
@@ -1882,7 +1906,11 @@ static struct token *declaration_specifiers(struct token *token, struct decl_sta
 	int class = CInt;
 	int rank = 0;
 
-	while (token_type(token) == TOKEN_IDENT) {
+	while (token_type(token) == TOKEN_IDENT || match_c23_attribute(token)) {
+		if (match_c23_attribute(token)) {
+			token = c23_attribute_specifier(token, ctx);
+			continue;
+		}
 		struct symbol *s = lookup_symbol(token->ident,
 						 NS_TYPEDEF | NS_SYMBOL);
 		if (!s || !(s->namespace & NS_TYPEDEF))
@@ -2040,16 +2068,22 @@ static bool match_attribute(struct token *token)
 
 static struct token *skip_attribute(struct token *token)
 {
-	token = token->next;
-	if (match_op(token, '(')) {
-		int depth = 1;
-		token = token->next;
-		while (depth && !eof_token(token)) {
-			if (token_type(token) == TOKEN_SPECIAL) {
-				if (token->special == '(')
-					depth++;
-				else if (token->special == ')')
-					depth--;
+	return skip_parens(token->next);
+}
+
+static struct token *skip_c23_attributes(struct token *token)
+{
+	while (match_c23_attribute(token)) {
+		token = token->next->next;
+		while (!eof_token(token)) {
+			if (match_op(token, ']') &&
+			    match_op(token->next, ']')) {
+				token = token->next->next;
+				break;
+			}
+			if (match_op(token, '(')) {
+				token = skip_parens(token);
+				continue;
 			}
 			token = token->next;
 		}
@@ -2057,27 +2091,113 @@ static struct token *skip_attribute(struct token *token)
 	return token;
 }
 
-static struct token *skip_attributes(struct token *token)
+static struct token *c23_attribute_specifier(struct token *token,
+					     struct decl_state *ctx)
 {
-	while (match_attribute(token)) {
-		token = expect(token->next, '(', "after attribute");
-		token = expect(token, '(', "after attribute");
-		while (token_type(token) == TOKEN_IDENT) {
-			token = skip_attribute(token);
-			if (!match_op(token, ','))
+	if (standard < STANDARD_C23 && Wpedantic)
+		warning(token->pos, "C23 attribute syntax is a C23 extension");
+
+	token = expect(token, '[', "in attribute specifier");
+	token = expect(token, '[', "in attribute specifier");
+
+	while (!match_op(token, ']') && !eof_token(token)) {
+		struct ident *prefix = NULL;
+		struct ident *attr_ident = NULL;
+		struct token *id_tok = NULL;
+
+		if (match_op(token, ',')) {
+			token = token->next;
+			continue;
+		}
+
+		if (token_type(token) != TOKEN_IDENT) {
+			sparse_error(token->pos, "expected attribute name");
+			break;
+		}
+
+		id_tok = token;
+		attr_ident = token->ident;
+		token = token->next;
+
+		if (match_op(token, ':') && match_op(token->next, ':')) {
+			prefix = attr_ident;
+			token = token->next->next;
+			if (token_type(token) != TOKEN_IDENT) {
+				sparse_error(
+					token->pos,
+					"expected attribute name after '::'");
 				break;
+			}
+			id_tok = token;
+			attr_ident = token->ident;
 			token = token->next;
 		}
-		token = expect(token, ')', "after attribute");
-		token = expect(token, ')', "after attribute");
+
+		if (!prefix || prefix == &gnu_ident ||
+		    prefix == &__gnu___ident) {
+			struct symbol *attr =
+				lookup_keyword(attr_ident, NS_KEYWORD);
+			if (attr && attr->op && attr->op->attribute)
+				token = attr->op->attribute(token, attr, ctx);
+			else {
+				if (Wunknown_attribute)
+					warning(id_tok->pos,
+						"unknown attribute '%s'",
+						show_ident(attr_ident));
+				token = skip_parens(token);
+			}
+		} else {
+			/* Other vendor prefixes (e.g. clang::...): ignore */
+			token = skip_parens(token);
+		}
+
+		if (match_op(token, ','))
+			token = token->next;
+		else if (match_op(token, ']'))
+			break;
+		else {
+			sparse_error(token->pos,
+				     "expected ']' or ',' after attribute");
+			break;
+		}
+	}
+
+	token = expect(token, ']', "at end of attribute specifier");
+	token = expect(token, ']', "at end of attribute specifier");
+	return token;
+}
+
+static struct token *skip_attributes(struct token *token)
+{
+	for (;;) {
+		if (match_attribute(token)) {
+			token = expect(token->next, '(', "after attribute");
+			token = expect(token, '(', "after attribute");
+			while (token_type(token) == TOKEN_IDENT) {
+				token = skip_attribute(token);
+				if (!match_op(token, ','))
+					break;
+				token = token->next;
+			}
+			token = expect(token, ')', "after attribute");
+			token = expect(token, ')', "after attribute");
+		} else if (match_c23_attribute(token)) {
+			token = skip_c23_attributes(token);
+		} else {
+			break;
+		}
 	}
 	return token;
 }
 
 static struct token *handle_attributes(struct token *token, struct decl_state *ctx)
 {
-	while (match_attribute(token))
-		token = attribute_specifier(token->next, NULL, ctx);
+	while (match_attribute(token) || match_c23_attribute(token)) {
+		if (match_attribute(token))
+			token = attribute_specifier(token->next, NULL, ctx);
+		else
+			token = c23_attribute_specifier(token, ctx);
+	}
 	return token;
 }
 
@@ -2115,10 +2235,10 @@ static enum kind which_func(struct token *token,
 			    struct ident **n,
 			    int prefer_abstract)
 {
-	struct token *next = token->next;
+	struct token *next = skip_attributes(token->next);
 
 	if (token_type(next) == TOKEN_IDENT) {
-		if (lookup_type(next))
+		if (lookup_type(next) || next != token->next)
 			return Proto;
 		/* identifier list not in definition; complain */
 		if (prefer_abstract)
@@ -2160,6 +2280,24 @@ static struct token *direct_declarator(struct token *token, struct decl_state *c
 	if (ctx->ident && token_type(token) == TOKEN_IDENT) {
 		*ctx->ident = token->ident;
 		token = token->next;
+		if (match_c23_attribute(token)) {
+			struct decl_state attr = { };
+			token = handle_attributes(token, &attr);
+			ctx->ident_modifiers |= (attr.ctype.modifiers & MOD_DECLARE) |
+						attr.f_modifiers;
+			if (attr.cleanup)
+				ctx->cleanup = attr.cleanup;
+			if (attr.packed)
+				ctx->packed = attr.packed;
+			if (attr.transparent_union)
+				ctx->transparent_union = attr.transparent_union;
+			if (attr.designated_init)
+				ctx->designated_init = attr.designated_init;
+			if (attr.ctype.alignment > ctx->ctype.alignment)
+				ctx->ctype.alignment = attr.ctype.alignment;
+			attr.ctype.modifiers &= ~MOD_DECLARE;
+			apply_ctype(token->pos, &ctx->ctype, &attr.ctype);
+		}
 	} else if (match_op(token, '(') &&
 	    is_nested(token, &next, ctx->prefer_abstract)) {
 		struct symbol *base_type = ctype->base_type;
@@ -2191,16 +2329,24 @@ static struct token *direct_declarator(struct token *token, struct decl_state *c
 			token = parameter_type_list(token, fn);
 		token = expect(token, ')', "in function declarator");
 		fn->endpos = token->pos;
+		if (match_c23_attribute(token)) {
+			struct decl_state attr = { };
+			token = handle_attributes(token, &attr);
+			ctype->modifiers |= attr.f_modifiers;
+			apply_ctype(token->pos, ctype, &attr.ctype);
+		}
 		return token;
 	}
 
-	while (match_op(token, '[')) {
+	while (match_op(token, '[') && !match_c23_attribute(token)) {
 		struct symbol *array;
 		array = alloc_indirect_symbol(token->pos, ctype, SYM_ARRAY);
 		token = abstract_array_declarator(token->next, array);
 		token = expect(token, ']', "in abstract_array_declarator");
 		array->endpos = token->pos;
 		ctype = &array->ctype;
+		if (match_c23_attribute(token))
+			token = handle_attributes(token, ctx);
 	}
 	return token;
 }
@@ -2295,6 +2441,7 @@ static struct token *declaration_list(struct token *token, struct symbol_list **
 	for (;;) {
 		struct symbol *decl = alloc_symbol(token->pos, SYM_NODE);
 		ctx.cleanup = NULL;
+		ctx.ident_modifiers = 0;
 		ctx.ident = &decl->ident;
 
 		token = declarator(token, &ctx);
@@ -2302,6 +2449,7 @@ static struct token *declaration_list(struct token *token, struct symbol_list **
 			token = handle_bitfield(token, &ctx);
 
 		token = handle_attributes(token, &ctx);
+		ctx.ctype.modifiers |= ctx.ident_modifiers;
 		apply_modifiers(token->pos, &ctx);
 
 		decl->ctype = ctx.ctype;
@@ -2366,6 +2514,7 @@ static struct token *parameter_declaration(struct token *token, struct symbol *s
 	ctx.ident = &sym->ident;
 	token = declarator(token, &ctx);
 	token = handle_attributes(token, &ctx);
+	ctx.ctype.modifiers |= ctx.ident_modifiers;
 	apply_modifiers(token->pos, &ctx);
 	sym->ctype = ctx.ctype;
 	sym->ctype.modifiers |= decl_modifiers(&ctx);
@@ -2412,6 +2561,8 @@ struct token *typename(struct token *token, struct symbol **p, int *forced)
 		ctx.ctype.base_type = &bad_ctype;
 	}
 	token = declarator(token, &ctx);
+	token = handle_attributes(token, &ctx);
+	ctx.ctype.modifiers |= ctx.ident_modifiers;
 	apply_modifiers(token->pos, &ctx);
 	sym->ctype = ctx.ctype;
 	sym->endpos = token->pos;
@@ -2700,7 +2851,10 @@ static struct token *parse_for_statement(struct token *token, struct statement *
 	syms = NULL;
 	e1 = NULL;
 	/* C99 variable declaration? */
-	if (lookup_type(token)) {
+	struct token *next = token;
+	if (match_c23_attribute(token))
+		next = skip_c23_attributes(token);
+	if (lookup_type(next)) {
 		token = external_declaration(token, &syms, validate_for_loop_decl);
 	} else {
 		token = parse_expression(token, &e1);
@@ -2873,13 +3027,13 @@ static struct token *handle_label_attributes(struct token *token, struct symbol 
 	struct decl_state ctx = { };
 
 	token = handle_attributes(token, &ctx);
-	label->label_modifiers = ctx.ctype.modifiers;
+	label->label_modifiers |= ctx.ctype.modifiers;
 	return token;
 }
 
 static bool is_label_token(struct token *token)
 {
-	struct token *p = token;
+	struct token *p = skip_c23_attributes(token);
 	struct symbol *s;
 
 	if (token_type(p) != TOKEN_IDENT)
@@ -2903,6 +3057,8 @@ static struct token *parse_one_label(struct token *token,
 
 	*stmtp = NULL;
 	*is_case = false;
+	if (match_c23_attribute(token))
+		token = handle_attributes(token, &attr_state);
 
 	if (token->ident == &case_ident) {
 		stmt = alloc_statement(token->pos, STMT_CASE);
@@ -2950,7 +3106,7 @@ static struct token *parse_one_label(struct token *token,
 
 static struct token *statement(struct token *token, struct statement **tree)
 {
-	struct statement *stmt = alloc_statement(token->pos, STMT_NONE);
+	struct statement *stmt;
 
 	if (is_label_token(token)) {
 		struct statement *lbl = NULL;
@@ -2971,6 +3127,27 @@ static struct token *statement(struct token *token, struct statement **tree)
 		return statement(token, tree);
 	}
 
+	if (match_c23_attribute(token)) {
+		struct token *next = skip_c23_attributes(token);
+		if (lookup_type(next)) {
+			sparse_error(token->pos, "declaration is not a statement");
+			stmt = alloc_statement(token->pos, STMT_DECLARATION);
+			*tree = stmt;
+			start_block_scope();
+			token = external_declaration(token, &stmt->declaration, NULL);
+			end_block_scope();
+			return token;
+		}
+		struct decl_state attr_state = {};
+		token = handle_attributes(token, &attr_state);
+		if (match_op(token, ';')) {
+			stmt = alloc_statement(token->pos, STMT_NONE);
+			*tree = stmt;
+			return token->next;
+		}
+		return statement(token, tree);
+	}
+	stmt = alloc_statement(token->pos, STMT_NONE);
 	*tree = stmt;
 	if (token_type(token) == TOKEN_IDENT) {
 		struct symbol *s = lookup_keyword(token->ident, NS_KEYWORD);
@@ -3031,6 +3208,7 @@ static struct token * statement_list(struct token *token, struct statement_list 
 		struct statement *label_head = NULL;
 		struct statement **label_tail = &label_head;
 		bool last_is_case = false;
+		struct token *next;
 
 		while (is_label_token(token)) {
 			struct statement *lbl = NULL;
@@ -3054,10 +3232,13 @@ static struct token * statement_list(struct token *token, struct statement_list 
 				add_statement(list, label_head);
 				break;
 			}
+			next = match_c23_attribute(token) ?
+				       skip_c23_attributes(token) :
+				       token;
 			if (match_ident(token, &_Static_assert_ident) ||
 			    (standard >= STANDARD_C23 &&
 			     match_ident(token, &static_assert_ident)) ||
-			    lookup_type(token)) {
+			    lookup_type(next)) {
 				if (standard < STANDARD_C23 && Wpedantic)
 					warning(token->pos,
 						"a label can only be part of a statement and a declaration is not a statement");
@@ -3081,7 +3262,10 @@ static struct token * statement_list(struct token *token, struct statement_list 
 			token = parse_static_assert(token, NULL);
 			continue;
 		}
-		if (lookup_type(token)) {
+		next = token;
+		if (match_c23_attribute(token))
+			next = skip_c23_attributes(token);
+		if (lookup_type(next)) {
 			if (seen_statement) {
 				warning(token->pos, "mixing declarations and code");
 				seen_statement = 0;
@@ -3457,6 +3641,7 @@ struct token *external_declaration(struct token *token, struct symbol_list **lis
 	struct symbol *decl;
 	struct decl_state ctx = { .ident = &ident };
 	struct ctype saved;
+	unsigned long saved_f_modifiers;
 	struct symbol *base_type;
 	unsigned long mod;
 	int is_typedef;
@@ -3495,9 +3680,11 @@ struct token *external_declaration(struct token *token, struct symbol_list **lis
 			     "'enum' underlying type may not be specified here");
 
 	saved = ctx.ctype;
+	saved_f_modifiers = ctx.f_modifiers;
 	token = declarator(token, &ctx);
 	token = handle_asm_name(token, &ctx);
 	token = handle_attributes(token, &ctx);
+	ctx.ctype.modifiers |= ctx.ident_modifiers;
 	apply_modifiers(token->pos, &ctx);
 
 	decl->ctype = ctx.ctype;
@@ -3753,10 +3940,13 @@ struct token *external_declaration(struct token *token, struct symbol_list **lis
 		decl = alloc_symbol(token->pos, SYM_NODE);
 		ctx.ctype = saved;
 		ctx.cleanup = NULL;
+		ctx.ident_modifiers = 0;
+		ctx.f_modifiers = saved_f_modifiers;
 		token = handle_attributes(token, &ctx);
 		token = declarator(token, &ctx);
 		token = handle_asm_name(token, &ctx);
 		token = handle_attributes(token, &ctx);
+		ctx.ctype.modifiers |= ctx.ident_modifiers;
 		apply_modifiers(token->pos, &ctx);
 		decl->ctype = ctx.ctype;
 		decl->ctype.modifiers |= mod;
@@ -3781,6 +3971,7 @@ struct token *external_declaration(struct token *token, struct symbol_list **lis
 		/* Function declarations are automatically extern unless specifically static */
 		base_type = decl->ctype.base_type;
 		if (!is_typedef && base_type && base_type->type == SYM_FN) {
+			decl->ctype.modifiers |= ctx.f_modifiers;
 			if (!(decl->ctype.modifiers & MOD_STATIC))
 				decl->ctype.modifiers |= MOD_EXTERN;
 		}
