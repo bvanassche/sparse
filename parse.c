@@ -62,8 +62,6 @@ static declarator_t autotype_specifier;
 static struct token *parse_if_statement(struct token *token, struct statement *stmt);
 static struct token *parse_return_statement(struct token *token, struct statement *stmt);
 static struct token *parse_loop_iterator(struct token *token, struct statement *stmt);
-static struct token *parse_default_statement(struct token *token, struct statement *stmt);
-static struct token *parse_case_statement(struct token *token, struct statement *stmt);
 static struct token *parse_switch_statement(struct token *token, struct statement *stmt);
 static struct token *parse_for_statement(struct token *token, struct statement *stmt);
 static struct token *parse_while_statement(struct token *token, struct statement *stmt);
@@ -315,11 +313,9 @@ static struct symbol_op loop_iter_op = {
 };
 
 static struct symbol_op default_op = {
-	.statement = parse_default_statement,
 };
 
 static struct symbol_op case_op = {
-	.statement = parse_case_statement,
 };
 
 static struct symbol_op switch_op = {
@@ -2518,32 +2514,6 @@ static struct token *parse_if_statement(struct token *token, struct statement *s
 	return statement(token->next, &stmt->if_false);
 }
 
-static inline struct token *case_statement(struct token *token, struct statement *stmt)
-{
-	stmt->type = STMT_CASE;
-	token = expect(token, ':', "after default/case");
-	add_case_statement(stmt);
-	if (match_op(token, '}')) {
-		warning(token->pos, "statement expected after case label");
-		stmt->case_statement = alloc_statement(token->pos, STMT_NONE);
-		return token;
-	}
-	return statement(token, &stmt->case_statement);
-}
-
-static struct token *parse_case_statement(struct token *token, struct statement *stmt)
-{
-	token = parse_expression(token->next, &stmt->case_expression);
-	if (match_op(token, SPECIAL_ELLIPSIS))
-		token = parse_expression(token->next, &stmt->case_to);
-	return case_statement(token, stmt);
-}
-
-static struct token *parse_default_statement(struct token *token, struct statement *stmt)
-{
-	return case_statement(token->next, stmt);
-}
-
 static struct token *parse_loop_iterator(struct token *token, struct statement *stmt)
 {
 	struct symbol *target = lookup_symbol(token->ident, NS_ITERATOR);
@@ -2646,46 +2616,129 @@ static struct token *handle_label_attributes(struct token *token, struct symbol 
 	return token;
 }
 
+static bool is_label_token(struct token *token)
+{
+	struct token *p = token;
+	struct symbol *s;
+
+	if (token_type(p) != TOKEN_IDENT)
+		return false;
+	if (p->ident == &case_ident || p->ident == &default_ident)
+		return true;
+	s = lookup_keyword(p->ident, NS_KEYWORD);
+	if (s && s->op->statement)
+		return false;
+	if (p->ident->reserved)
+		return false;
+	return match_op(p->next, ':');
+}
+
+static struct token *parse_one_label(struct token *token,
+				     struct statement **stmtp,
+				     bool *is_case)
+{
+	struct decl_state attr_state = { };
+	struct statement *stmt;
+
+	*stmtp = NULL;
+	*is_case = false;
+
+	if (token->ident == &case_ident) {
+		stmt = alloc_statement(token->pos, STMT_CASE);
+		token = parse_expression(token->next, &stmt->case_expression);
+		if (match_op(token, SPECIAL_ELLIPSIS))
+			token = parse_expression(token->next, &stmt->case_to);
+		token = expect(token, ':', "after default/case");
+		add_case_statement(stmt);
+		*stmtp = stmt;
+		*is_case = true;
+		return token;
+	}
+	if (token->ident == &default_ident) {
+		stmt = alloc_statement(token->pos, STMT_CASE);
+		token = expect(token->next, ':', "after default/case");
+		add_case_statement(stmt);
+		*stmtp = stmt;
+		*is_case = true;
+		return token;
+	}
+
+	{
+		struct position pos = token->pos;
+		struct symbol *s = label_symbol(token, 0);
+		s->label_modifiers |= attr_state.ctype.modifiers;
+		token = handle_label_attributes(token->next->next, s);
+		if (s->stmt) {
+			sparse_error(pos, "label '%s' redefined",
+				     show_ident(s->ident));
+			return token;
+		}
+		stmt = alloc_statement(pos, STMT_LABEL);
+		stmt->label_identifier = s;
+		stmt->label_scope = label_scope;
+		if (s->label_scope) {
+			if (!is_in_scope(label_scope, s->label_scope))
+				warn_label_usage(stmt->pos, s->label_pos,
+						 s->ident);
+		}
+		s->stmt = stmt;
+		*stmtp = stmt;
+		return token;
+	}
+}
+
 static struct token *statement(struct token *token, struct statement **tree)
 {
 	struct statement *stmt = alloc_statement(token->pos, STMT_NONE);
+
+	if (is_label_token(token)) {
+		struct statement *lbl = NULL;
+		bool is_case = false;
+
+		token = parse_one_label(token, &lbl, &is_case);
+		if (!lbl)
+			return statement(token, tree);
+		*tree = lbl;
+		tree = is_case ? &lbl->case_statement : &lbl->label_statement;
+		if (match_op(token, '}')) {
+			sparse_error(token->pos,
+				     is_case ? "statement expected after case label" :
+					       "statement expected after label");
+			*tree = alloc_statement(token->pos, STMT_NONE);
+			return token;
+		}
+		return statement(token, tree);
+	}
 
 	*tree = stmt;
 	if (token_type(token) == TOKEN_IDENT) {
 		struct symbol *s = lookup_keyword(token->ident, NS_KEYWORD);
 		if (s && s->op->statement)
 			return s->op->statement(token, stmt);
-
-		if (match_op(token->next, ':')) {
-			struct symbol *s = label_symbol(token, 0);
-			token = handle_label_attributes(token->next->next, s);
-			if (s->stmt) {
-				sparse_error(stmt->pos, "label '%s' redefined", show_ident(s->ident));
-				// skip the label to avoid multiple definitions
-				return statement(token, tree);
-			}
-			stmt->type = STMT_LABEL;
-			stmt->label_identifier = s;
-			stmt->label_scope = label_scope;
-			if (s->label_scope) {
-				if (!is_in_scope(label_scope, s->label_scope))
-					warn_label_usage(stmt->pos, s->label_pos, s->ident);
-			}
-			s->stmt = stmt;
-			if (match_op(token, '}')) {
-				warning(token->pos, "statement expected after label");
-				stmt->label_statement = alloc_statement(token->pos, STMT_NONE);
-				return token;
-			}
-			return statement(token, &stmt->label_statement);
-		}
 	}
 
 	if (match_op(token, '{')) {
 		token = compound_statement(token->next, stmt);
 		return expect(token, '}', "at end of compound statement");
 	}
-			
+
+	if (match_ident(token, &_Static_assert_ident) ||
+	    (standard >= STANDARD_C23 &&
+	     match_ident(token, &static_assert_ident))) {
+		sparse_error(token->pos, "declaration is not a statement");
+		stmt->type = STMT_NONE;
+		return parse_static_assert(token, NULL);
+	}
+
+	if (lookup_type(token)) {
+		sparse_error(token->pos, "declaration is not a statement");
+		stmt->type = STMT_DECLARATION;
+		start_block_scope();
+		token = external_declaration(token, &stmt->declaration, NULL);
+		end_block_scope();
+		return token;
+	}
+
 	stmt->type = STMT_EXPRESSION;
 	return expression_statement(token, &stmt->expression);
 }
@@ -2714,6 +2767,49 @@ static struct token * statement_list(struct token *token, struct statement_list 
 		token = label_statement(token->next);
 	for (;;) {
 		struct statement * stmt;
+		struct statement *label_head = NULL;
+		struct statement **label_tail = &label_head;
+		bool last_is_case = false;
+
+		while (is_label_token(token)) {
+			struct statement *lbl = NULL;
+			bool is_case = false;
+
+			token = parse_one_label(token, &lbl, &is_case);
+			if (!lbl)
+				continue;
+			*label_tail = lbl;
+			label_tail = is_case ? &lbl->case_statement :
+					       &lbl->label_statement;
+			last_is_case = is_case;
+		}
+		if (label_head) {
+			if (eof_token(token) || match_op(token, '}')) {
+				if (standard < STANDARD_C23)
+					warning(token->pos,
+						last_is_case ? "statement expected after case label" :
+							       "statement expected after label");
+				*label_tail = alloc_statement(token->pos, STMT_NONE);
+				add_statement(list, label_head);
+				break;
+			}
+			if (match_ident(token, &_Static_assert_ident) ||
+			    (standard >= STANDARD_C23 &&
+			     match_ident(token, &static_assert_ident)) ||
+			    lookup_type(token)) {
+				if (standard < STANDARD_C23 && Wpedantic)
+					warning(token->pos,
+						"a label can only be part of a statement and a declaration is not a statement");
+				*label_tail = alloc_statement(token->pos, STMT_NONE);
+				add_statement(list, label_head);
+			} else {
+				seen_statement = Wdeclarationafterstatement;
+				token = statement(token, label_tail);
+				add_statement(list, label_head);
+				continue;
+			}
+		}
+
 		if (eof_token(token))
 			break;
 		if (match_op(token, '}'))
