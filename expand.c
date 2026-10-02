@@ -80,17 +80,85 @@ static int expand_symbol_expression(struct expression *expr)
 	return (sym->ctype.modifiers & (MOD_STATIC | MOD_EXTERN)) ? 2 : 1;
 }
 
+static inline int clamp_mask_bits(int bits)
+{
+	if (bits <= 0)
+		return 0;
+	if (bits > 64)
+		return 64;
+	return bits;
+}
+
+static bool expr_is_neg_int(const struct expression *e)
+{
+	int w = effective_int_width(e->ctype);
+
+	if (e->ctype->ctype.modifiers & MOD_UNSIGNED)
+		return false;
+	if (w > 64)
+		return e->value_neg;
+	return w > 0 && (e->value & sign_bit(w)) != 0;
+}
+
+#ifdef __SIZEOF_INT128__
+static unsigned __int128 get_uint128(const struct expression *e)
+{
+	int w = effective_int_width(e->ctype);
+
+	if (w > 64) {
+		if (e->value_neg && !e->value_hi)
+			return (unsigned __int128)(__int128)(long long)e->value;
+		return ((unsigned __int128)e->value_hi << 64) | e->value;
+	}
+	if (e->ctype->ctype.modifiers & MOD_UNSIGNED)
+		return (unsigned __int128)(unsigned long long)zero_extend(e->value, w);
+	return (unsigned __int128)(__int128)bits_extend(e->value, w, 1);
+}
+
+static bool store_int128(struct expression *expr, struct symbol *ctype,
+			 unsigned __int128 uval)
+{
+	int w = effective_int_width(ctype);
+	int is_signed = !(ctype->ctype.modifiers & MOD_UNSIGNED);
+	unsigned __int128 mask = w >= 128 ? ~(unsigned __int128)0 :
+					    (((unsigned __int128)1 << w) - 1);
+	unsigned long long lo, hi;
+	int neg;
+
+	uval &= mask;
+	if (is_signed && (uval & ((unsigned __int128)1 << (w - 1)))) {
+		uval |= ~mask;
+		neg = 1;
+	} else {
+		neg = 0;
+	}
+	lo = (unsigned long long)uval;
+	hi = (unsigned long long)(uval >> 64);
+	if (!is_bitint_type(ctype) &&
+	    (hi != (neg ? ~0ULL : 0ULL) || (neg && !(lo & (1ULL << 63)))))
+		return false;
+	expr->value = lo;
+	expr->value_hi = hi;
+	expr->value_neg = neg;
+	return true;
+}
+#endif
+
 static long long get_longlong(struct expression *expr)
 {
+	int w = effective_int_width(expr->ctype);
 	int is_signed = !(expr->ctype->ctype.modifiers & MOD_UNSIGNED);
-	return bits_extend(expr->value, expr->ctype->bit_size, is_signed);
+
+	if (w > 64)
+		return (long long)expr->value;
+	return bits_extend(expr->value, w, is_signed);
 }
 
 void cast_value(struct expression *expr, struct symbol *newtype, struct expression *old)
 {
 	struct symbol *oldtype = old->ctype;
-	int old_size = oldtype->bit_size;
-	int new_size = newtype->bit_size;
+	int old_size = effective_int_width(oldtype);
+	int new_size = effective_int_width(newtype);
 	long long value;
 	unsigned long long mask, signmask;
 	unsigned long long oldmask, oldsignmask, dropped;
@@ -98,28 +166,44 @@ void cast_value(struct expression *expr, struct symbol *newtype, struct expressi
 	if (is_float_type(newtype) || is_float_type(oldtype))
 		goto Float;
 
-	if (!is_bool_type(newtype) && new_size > 64 && old_size >= 64 &&
-	    new_size > old_size && (oldtype->ctype.modifiers & MOD_UNSIGNED) &&
-	    (old->value & (1ULL << 63)))
+	if (!is_bool_type(newtype) && new_size > 64) {
+#ifdef __SIZEOF_INT128__
+		struct expression tmp = *expr;
+		if (!store_int128(&tmp, newtype, get_uint128(old)))
+			return;
+		expr->type = EXPR_VALUE;
+		expr->taint = old->taint;
+		expr->ctype = newtype;
+		expr->value = tmp.value;
+		expr->value_hi = tmp.value_hi;
+		expr->value_neg = tmp.value_neg;
+#endif
 		return;
+	}
 
 	// For pointers and integers, we can just move the value around
 	expr->type = EXPR_VALUE;
 	expr->taint = old->taint;
-	if (old_size == new_size && !is_bool_type(newtype)) {
-		expr->value = old->value;
+	if (old_size == new_size && old_size <= 64 && !is_bool_type(newtype)) {
+		expr->value = old->value & bits_mask(new_size);
+		expr->value_hi = 0;
+		expr->value_neg = 0;
 		expr->ctype = newtype;
 		return;
 	}
 
 	if (is_bool_type(newtype)) {
-		bool non_zero = old->value != 0;
-		bool is_one = old->value == 1;
+		bool non_zero = old->value != 0 || old->value_hi != 0;
+		bool is_one = old->value == 1 && old->value_hi == 0 &&
+			      !expr_is_neg_int(old);
+		unsigned long long oval = old->value;
 		expr->ctype = newtype;
 		expr->value = non_zero;
+		expr->value_hi = 0;
+		expr->value_neg = 0;
 		if (!conservative && non_zero && !is_one)
 			warning(old->pos, "odd constant _Bool cast (%llx becomes 1)",
-				old->value);
+				oval);
 		return;
 	}
 
@@ -128,11 +212,26 @@ void cast_value(struct expression *expr, struct symbol *newtype, struct expressi
 	expr->ctype = newtype;
 
 Int:
+	expr->value_hi = 0;
+	expr->value_neg = 0;
 	// _Bool requires a zero test rather than truncation.
 	if (is_bool_type(newtype)) {
 		expr->value = !!value;
 		if (!conservative && value != 0 && value != 1)
 			warning(old->pos, "odd constant _Bool cast (%llx becomes 1)", value);
+		return;
+	}
+
+	if (new_size <= 0) {
+		expr->value = 0;
+		return;
+	}
+
+	if (new_size > 64) {
+		expr->value = value;
+		expr->value_neg = !(newtype->ctype.modifiers & MOD_UNSIGNED) &&
+				  value < 0;
+		expr->value_hi = expr->value_neg ? ~0ULL : 0ULL;
 		return;
 	}
 
@@ -142,7 +241,9 @@ Int:
 	expr->value = value & mask;
 
 	// Stop here unless checking for truncation
-	if (!Wcast_truncate || conservative)
+	if (!Wcast_truncate || conservative || old_size <= 0)
+		return;
+	if (old_size > 64 && !old->value_neg && !old->value_hi && new_size == 64)
 		return;
 	
 	// Check if we dropped any bits..
@@ -168,6 +269,8 @@ Float:
 			expr->taint = 0;
 			expr->ctype = newtype;
 			expr->value = (fval != 0);
+			expr->value_hi = 0;
+			expr->value_neg = 0;
 			return;
 		}
 		if (new_size <= 0 || new_size > 64 || !__builtin_isfinite(fval))
@@ -207,10 +310,19 @@ Float:
 	}
 
 	if (!is_float_type(oldtype)) {
-		if ((oldtype->ctype.modifiers & MOD_UNSIGNED) &&
-		    old_size > 64 && (old->value & (1ULL << 63)))
-			return;
-		if (oldtype->ctype.modifiers & MOD_UNSIGNED)
+		if (old_size > 64) {
+#ifdef __SIZEOF_INT128__
+			if (old->value_neg)
+				expr->fvalue = (long double)(__int128)get_uint128(old);
+			else
+				expr->fvalue = (long double)get_uint128(old);
+#else
+			if (old->value_neg)
+				expr->fvalue = (long double)(long long)old->value;
+			else
+				expr->fvalue = (long double)(unsigned long long)old->value;
+#endif
+		} else if (oldtype->ctype.modifiers & MOD_UNSIGNED)
 			expr->fvalue = (long double)(unsigned long long)get_longlong(old);
 		else
 			expr->fvalue = (long double)get_longlong(old);
@@ -231,10 +343,12 @@ Float:
 static bool check_shift_count(struct expression *expr, struct expression *right)
 {
 	struct symbol *ctype = expr->ctype;
-	long long count = get_longlong(right);
+	int width = effective_int_width(ctype);
 
-	if (count >= 0 && count < ctype->bit_size)
-		return true;
+	if (expr_is_neg_int(right) || right->value_hi != 0)
+		return false;
+	if (right->value < (unsigned long long)width && right->value < 128)
+		return width > 64 || right->value < 64;
 	return false;
 }
 
@@ -250,7 +364,7 @@ static int simplify_int_binop(struct expression *expr, struct symbol *ctype)
 	struct expression *left = expr->left, *right = expr->right;
 	unsigned long long v, l, r, mask;
 	signed long long sl, sr;
-	int is_signed;
+	int is_signed, bits, raw_bits;
 
 	if (right->type != EXPR_VALUE)
 		return 0;
@@ -261,11 +375,92 @@ static int simplify_int_binop(struct expression *expr, struct symbol *ctype)
 	}
 	if (left->type != EXPR_VALUE)
 		return 0;
-	if (!ctype || ctype->bit_size <= 0 || ctype->bit_size > 64)
+	raw_bits = effective_int_width(ctype);
+	if (raw_bits <= 0)
 		return 0;
-	l = left->value; r = right->value;
 	is_signed = !(ctype->ctype.modifiers & MOD_UNSIGNED);
-	mask = sign_bit(ctype->bit_size);
+	if (raw_bits > 64) {
+#ifdef __SIZEOF_INT128__
+		unsigned __int128 ul = get_uint128(left);
+		unsigned __int128 ur = get_uint128(right);
+		__int128 sl128 = (__int128)ul, sr128 = (__int128)ur;
+		unsigned __int128 sbit128 = (unsigned __int128)1 << (raw_bits - 1);
+		unsigned __int128 ures;
+
+		switch (CONVERT(expr->op, is_signed)) {
+		case SIGNED('+'):
+		case UNSIGNED('+'):
+			ures = ul + ur;
+			break;
+		case SIGNED('-'):
+		case UNSIGNED('-'):
+			ures = ul - ur;
+			break;
+		case SIGNED('&'):
+		case UNSIGNED('&'):
+			ures = ul & ur;
+			break;
+		case SIGNED('|'):
+		case UNSIGNED('|'):
+			ures = ul | ur;
+			break;
+		case SIGNED('^'):
+		case UNSIGNED('^'):
+			ures = ul ^ ur;
+			break;
+		case SIGNED('*'):
+		case UNSIGNED('*'):
+			ures = ul * ur;
+			break;
+		case SIGNED('/'):
+			if (!ur)
+				goto Div;
+			if ((ul & ((sbit128 << 1) - 1)) == sbit128 && sr128 == -1)
+				goto Overflow;
+			ures = (unsigned __int128)(sl128 / sr128);
+			break;
+		case UNSIGNED('/'):
+			if (!ur)
+				goto Div;
+			ures = ul / ur;
+			break;
+		case SIGNED('%'):
+			if (!ur)
+				goto Div;
+			if ((ul & ((sbit128 << 1) - 1)) == sbit128 && sr128 == -1)
+				goto Overflow;
+			ures = (unsigned __int128)(sl128 % sr128);
+			break;
+		case UNSIGNED('%'):
+			if (!ur)
+				goto Div;
+			ures = ul % ur;
+			break;
+		case SIGNED(SPECIAL_LEFTSHIFT):
+		case UNSIGNED(SPECIAL_LEFTSHIFT):
+			ures = r < 128 ? (ul << r) : 0;
+			break;
+		case SIGNED(SPECIAL_RIGHTSHIFT):
+			ures = (unsigned __int128)(sl128 >> (r < 127 ? r : 127));
+			break;
+		case UNSIGNED(SPECIAL_RIGHTSHIFT):
+			ures = r < 128 ? (ul >> r) : 0;
+			break;
+		default:
+			return 0;
+		}
+		if (!store_int128(expr, ctype, ures))
+			return 0;
+		expr->type = EXPR_VALUE;
+		expr->taint = left->taint | right->taint;
+		return 1;
+#else
+		return 0;
+#endif
+	}
+	bits = clamp_mask_bits(raw_bits);
+	l = left->value; r = right->value;
+	mask = sign_bit(bits);
 	sl = l; sr = r;
 	if (is_signed && (sl & mask))
 		sl |= ~(mask-1);
@@ -345,8 +540,10 @@ static int simplify_int_binop(struct expression *expr, struct symbol *ctype)
 	default:
 		return 0;
 	}
-	mask = bits_mask(ctype->bit_size);
+	mask = bits_mask(bits);
 	expr->value = v & mask;
+	expr->value_hi = 0;
+	expr->value_neg = 0;
 	expr->type = EXPR_VALUE;
 	expr->taint = left->taint | right->taint;
 	return 1;
@@ -365,13 +562,43 @@ static int simplify_cmp_binop(struct expression *expr, struct symbol *ctype)
 	struct expression *left = expr->left, *right = expr->right;
 	unsigned long long l, r, mask;
 	signed long long sl, sr;
+	int bits, raw_bits;
 
 	if (left->type != EXPR_VALUE || right->type != EXPR_VALUE)
 		return 0;
-	if (!ctype || ctype->bit_size <= 0 || ctype->bit_size > 64)
+	raw_bits = effective_int_width(ctype);
+	if (raw_bits <= 0)
 		return 0;
+	if (raw_bits > 64) {
+#ifdef __SIZEOF_INT128__
+		unsigned __int128 ul = get_uint128(left);
+		unsigned __int128 ur = get_uint128(right);
+		__int128 sl128 = (__int128)ul, sr128 = (__int128)ur;
+
+		switch (expr->op) {
+		case '<':		expr->value = sl128 < sr128; break;
+		case '>':		expr->value = sl128 > sr128; break;
+		case SPECIAL_LTE:	expr->value = sl128 <= sr128; break;
+		case SPECIAL_GTE:	expr->value = sl128 >= sr128; break;
+		case SPECIAL_EQUAL:	expr->value = ul == ur; break;
+		case SPECIAL_NOTEQUAL:	expr->value = ul != ur; break;
+		case SPECIAL_UNSIGNED_LT:expr->value = ul < ur; break;
+		case SPECIAL_UNSIGNED_GT:expr->value = ul > ur; break;
+		case SPECIAL_UNSIGNED_LTE:expr->value = ul <= ur; break;
+		case SPECIAL_UNSIGNED_GTE:expr->value = ul >= ur; break;
+		}
+		expr->value_hi = 0;
+		expr->value_neg = 0;
+		expr->type = EXPR_VALUE;
+		expr->taint = left->taint | right->taint;
+		return 1;
+#else
+		return 0;
+#endif
+	}
+	bits = clamp_mask_bits(raw_bits);
 	l = left->value; r = right->value;
-	mask = sign_bit(ctype->bit_size);
+	mask = sign_bit(bits);
 	sl = l; sr = r;
 	if (sl & mask)
 		sl |= ~(mask-1);
@@ -389,6 +616,8 @@ static int simplify_cmp_binop(struct expression *expr, struct symbol *ctype)
 	case SPECIAL_UNSIGNED_LTE:expr->value = l <= r; break;
 	case SPECIAL_UNSIGNED_GTE:expr->value = l >= r; break;
 	}
+	expr->value_hi = 0;
+	expr->value_neg = 0;
 	expr->type = EXPR_VALUE;
 	expr->taint = left->taint | right->taint;
 	return 1;
@@ -461,6 +690,8 @@ static int simplify_float_cmp(struct expression *expr, struct symbol *ctype)
 	case SPECIAL_EQUAL:	expr->value = l == r; break;
 	case SPECIAL_NOTEQUAL:	expr->value = l != r; break;
 	}
+	expr->value_hi = 0;
+	expr->value_neg = 0;
 	expr->type = EXPR_VALUE;
 	expr->taint = 0;
 	return 1;
@@ -489,16 +720,20 @@ static int expand_logical(struct expression *expr)
 	cost = expand_expression(left);
 	if (left->type == EXPR_VALUE) {
 		if (expr->op == SPECIAL_LOGICAL_AND) {
-			if (!left->value) {
+			if (!left->value && !left->value_hi) {
 				expr->type = EXPR_VALUE;
 				expr->value = 0;
+				expr->value_hi = 0;
+				expr->value_neg = 0;
 				expr->taint = left->taint;
 				return 0;
 			}
 		} else {
-			if (left->value) {
+			if (left->value || left->value_hi) {
 				expr->type = EXPR_VALUE;
 				expr->value = 1;
+				expr->value_hi = 0;
+				expr->value_neg = 0;
 				expr->taint = left->taint;
 				return 0;
 			}
@@ -513,7 +748,9 @@ static int expand_logical(struct expression *expr)
 		 * otherwise we would have short-circuited it..
 		 */
 		expr->type = EXPR_VALUE;
-		expr->value = right->value != 0;
+		expr->value = (right->value != 0 || right->value_hi != 0);
+		expr->value_hi = 0;
+		expr->value_neg = 0;
 		expr->taint = left->taint | right->taint;
 		return 0;
 	}
@@ -586,6 +823,8 @@ static int expand_compare(struct expression *expr)
 			int op = expr->op;
 			expr->type = EXPR_VALUE;
 			expr->value = compare_types(op, left->symbol, right->symbol);
+			expr->value_hi = 0;
+			expr->value_neg = 0;
 			expr->taint = 0;
 			return 0;
 		}
@@ -607,7 +846,7 @@ static int expand_conditional(struct expression *expr)
 	cond_cost = expand_expression(cond);
 	if (cond->type == EXPR_VALUE) {
 		unsigned flags = expr->flags;
-		if (!cond->value)
+		if (!cond->value && !cond->value_hi)
 			valt = valf;
 		if (!valt)
 			valt = cond;
@@ -838,7 +1077,8 @@ static int expand_dereference(struct expression *expr)
 
 		/* Const symbol with a constant initializer? */
 		if (value && value->ctype) {
-			if (ctype->bit_size != value->ctype->bit_size)
+			if (ctype->bit_size != value->ctype->bit_size ||
+			    effective_int_width(ctype) != effective_int_width(value->ctype))
 				return UNSAFE;
 			if (value->type == EXPR_VALUE) {
 				if (!is_integral_type(ctype))
@@ -847,6 +1087,8 @@ static int expand_dereference(struct expression *expr)
 					return UNSAFE;
 				expr->type = EXPR_VALUE;
 				expr->value = value->value;
+				expr->value_hi = value->value_hi;
+				expr->value_neg = value->value_neg;
 				expr->taint = 0;
 				if (sym->ctype.modifiers & MOD_CONSTEXPR)
 					expr->flags = is_int_type(ctype) ? CEF_SET_ICE : CEF_ADDR;
@@ -882,13 +1124,48 @@ int early_simplify_preop(struct expression *expr)
 {
 	struct expression *op = expr->unop;
 	unsigned long long v, mask;
+	int bits, raw_bits;
 
 	if (op->type != EXPR_VALUE)
 		return 0;
-	if (!expr->ctype || expr->ctype->bit_size <= 0 || expr->ctype->bit_size > 64)
-		return 0;
 
-	mask = sign_bit(expr->ctype->bit_size);
+	raw_bits = effective_int_width(expr->ctype);
+	if (raw_bits <= 0)
+		return 0;
+	if (raw_bits > 64) {
+#ifdef __SIZEOF_INT128__
+		unsigned __int128 u = get_uint128(op);
+
+		switch (expr->op) {
+		case '+':
+			break;
+		case '!':
+			expr->value = (u == 0);
+			expr->value_hi = 0;
+			expr->value_neg = 0;
+			expr->type = EXPR_VALUE;
+			expr->taint = op->taint;
+			return 1;
+		case '-':
+			u = -u;
+			break;
+		case '~':
+			u = ~u;
+			break;
+		default:
+			return 0;
+		}
+		if (!store_int128(expr, expr->ctype, u))
+			return 0;
+		expr->type = EXPR_VALUE;
+		expr->taint = op->taint;
+		return 1;
+#else
+		return 0;
+#endif
+	}
+	bits = clamp_mask_bits(raw_bits);
+	mask = sign_bit(bits);
 	v = op->value;
 	switch (expr->op) {
 	case '+': break;
@@ -901,8 +1178,10 @@ int early_simplify_preop(struct expression *expr)
 	case '~': v = ~v; break;
 	default: return 0;
 	}
-	mask = bits_mask(expr->ctype->bit_size);
+	mask = bits_mask(bits);
 	expr->value = v & mask;
+	expr->value_hi = 0;
+	expr->value_neg = 0;
 	expr->type = EXPR_VALUE;
 	expr->taint = op->taint;
 	return 1;
@@ -998,6 +1277,11 @@ static int expand_cast(struct expression *expr)
 
 	/* Simplify normal integer casts.. */
 	if (target->type == EXPR_VALUE || target->type == EXPR_FVALUE) {
+		if (target->type == EXPR_VALUE &&
+		    effective_int_width(expr->ctype) > 64 &&
+		    (expr->ctype->ctype.modifiers & MOD_UNSIGNED) &&
+		    expr_is_neg_int(target))
+			return cost + 1;
 		cast_value(expr, expr->ctype, target);
 		if (expr->type == EXPR_VALUE || expr->type == EXPR_FVALUE)
 			return 0;
@@ -1508,6 +1792,7 @@ static long long __get_expression_value(struct expression *expr, int strict)
 	long long value;
 	unsigned long long mask;
 	struct symbol *ctype;
+	int bits;
 
 	if (!expr)
 		return 0;
@@ -1528,13 +1813,18 @@ static long long __get_expression_value(struct expression *expr, int strict)
 	}
 
 	value = expr->value;
-	mask = sign_bit(ctype->bit_size);
+	if (effective_int_width(ctype) > 64)
+		return value;
+	bits = clamp_mask_bits(effective_int_width(ctype));
+	if (!bits)
+		return value;
+	mask = sign_bit(bits);
 
 	if (value & mask) {
 		while (ctype->type != SYM_BASETYPE)
 			ctype = ctype->ctype.base_type;
 		if (!(ctype->ctype.modifiers & MOD_UNSIGNED))
-			value = value | mask | ~(mask-1);
+			value = value | mask | ~(mask - 1);
 	}
 	return value;
 }
@@ -1577,7 +1867,7 @@ redo:
 		expr = expr->right;
 		goto redo;
 	case EXPR_VALUE:
-		return expr->value != 0;
+		return expr->value != 0 || expr->value_hi != 0;
 	case EXPR_FVALUE:
 		return expr->fvalue != 0;
 	default:
@@ -1591,7 +1881,7 @@ int is_zero_constant(struct expression *expr)
 	conservative = 1;
 	expand_expression(expr);
 	conservative = saved;
-	return expr->type == EXPR_VALUE && !expr->value;
+	return expr->type == EXPR_VALUE && !expr->value && !expr->value_hi;
 }
 
 void expand_constexpr_initializer(struct expression *expr)

@@ -350,6 +350,15 @@ deeper:
 	if (!sym)
 		goto out;
 
+	if (sym->type == SYM_BASETYPE && is_bitint_type(sym)) {
+		if (sym->ctype.modifiers & MOD_UNSIGNED)
+			prepend(name, "unsigned _BitInt(%d)",
+				sym->bitint_width);
+		else
+			prepend(name, "_BitInt(%d)", sym->bitint_width);
+		goto out;
+	}
+
 	if ((typename = builtin_typename(sym))) {
 		if (name->start != name->end)
 			prepend(name, " ");

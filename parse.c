@@ -66,6 +66,7 @@ static declarator_t
 	storage_specifier, thread_specifier;
 static declarator_t generic_qualifier;
 static declarator_t autotype_specifier, auto_specifier, constexpr_specifier;
+static declarator_t bitint_specifier;
 
 static struct token *parse_if_statement(struct token *token, struct statement *stmt);
 static struct token *parse_return_statement(struct token *token, struct statement *stmt);
@@ -113,7 +114,9 @@ enum {
 	Set_Long = 512,
 	Set_Vlong = 1024,
 	Set_Int128 = 2048,
-	Set_Any = Set_T | Set_Short | Set_Long | Set_Signed | Set_Unsigned
+	Set_BitInt = 4096,
+	Set_Any = Set_T | Set_Short | Set_Long | Set_Signed | Set_Unsigned |
+		Set_BitInt
 };
 
 enum {
@@ -282,7 +285,8 @@ static struct symbol_op float_op = {
 
 static struct symbol_op short_op = {
 	.type = KW_SPECIFIER,
-	.test = Set_S|Set_Char|Set_Float|Set_Double|Set_Long|Set_Short,
+	.test = Set_S | Set_Char | Set_Float | Set_Double | Set_Long |
+		Set_Short | Set_BitInt,
 	.set = Set_Short,
 };
 
@@ -302,15 +306,25 @@ static struct symbol_op unsigned_op = {
 
 static struct symbol_op long_op = {
 	.type = KW_SPECIFIER,
-	.test = Set_S|Set_Char|Set_Float|Set_Short|Set_Vlong,
+	.test = Set_S | Set_Char | Set_Float | Set_Short | Set_Vlong |
+		Set_BitInt,
 	.set = Set_Long,
 };
 
 static struct symbol_op int128_op = {
 	.type = KW_SPECIFIER,
-	.test = Set_S|Set_T|Set_Char|Set_Short|Set_Int|Set_Float|Set_Double|Set_Long|Set_Vlong|Set_Int128,
-	.set =  Set_T|Set_Int128|Set_Vlong,
+	.test = Set_S | Set_T | Set_Char | Set_Short | Set_Int | Set_Float |
+		Set_Double | Set_Long | Set_Vlong | Set_Int128 | Set_BitInt,
+	.set = Set_T | Set_Int128 | Set_Vlong,
 	.class = CInt,
+};
+
+static struct symbol_op bitint_op = {
+	.type = KW_SPECIFIER,
+	.test = Set_S | Set_T | Set_Char | Set_Short | Set_Int | Set_Float |
+		Set_Double | Set_Long | Set_Vlong | Set_Int128 | Set_BitInt,
+	.set = Set_T | Set_BitInt,
+	.declarator = bitint_specifier,
 };
 
 static struct symbol_op if_op = {
@@ -531,6 +545,7 @@ static struct init_keyword {
 	N("__int128",		&int128_op),
 	N("_Bool",		&spec_op,	.type = &bool_ctype),
 	N("bool",		&spec_op,	.type = &bool_ctype, .std = STANDARD_C23),
+	N("_BitInt",		&bitint_op),
 
 	/* Predeclared types */
 	N("__builtin_va_list",	&spec_op,	.type = &ptr_ctype),
@@ -843,7 +858,7 @@ static struct token *struct_union_enum_specifier(enum type type,
 			check_typename_storage(underlying);
 			underlying = examine_symbol_type(underlying);
 			if (!underlying || !is_int_type(underlying) ||
-			    is_enum_type(underlying)) {
+			    is_enum_type(underlying) || is_bitint_type(underlying)) {
 				sparse_error(token->pos,
 					     "invalid 'enum' underlying type");
 				underlying = &int_ctype;
@@ -927,7 +942,7 @@ static struct token *struct_union_enum_specifier(enum type type,
 			check_typename_storage(underlying);
 			underlying = examine_symbol_type(underlying);
 			if (!underlying || !is_int_type(underlying) ||
-			    is_enum_type(underlying)) {
+			    is_enum_type(underlying) || is_bitint_type(underlying)) {
 				sparse_error(token->pos,
 					     "invalid 'enum' underlying type");
 				underlying = &int_ctype;
@@ -1421,6 +1436,32 @@ static void apply_constexpr_const(struct symbol *sym)
 	}
 }
 
+static struct token *bitint_specifier(struct token *token, struct symbol *sym,
+				      struct decl_state *ctx)
+{
+	struct expression *expr = NULL;
+
+	if (standard < STANDARD_C23 && Wpedantic)
+		warning(token->pos, "'_BitInt' is a C23 feature");
+
+	ctx->bitint_pos = token->pos;
+	if (!match_op(token, '(')) {
+		sparse_error(token->pos, "expected '(' after '_BitInt'");
+		ctx->bitint_width = -1;
+		return token;
+	}
+	token = conditional_expression(token->next, &expr);
+	if (!expr) {
+		sparse_error(token->pos,
+			     "expected expression for _BitInt width");
+		ctx->bitint_width = -1;
+	} else {
+		ctx->bitint_width = const_expression_value(expr);
+	}
+	token = expect(token, ')', "after _BitInt width");
+	return token;
+}
+
 static struct token *ignore_attribute(struct token *token, struct symbol *attr, struct decl_state *ctx)
 {
 	struct expression *expr = NULL;
@@ -1837,7 +1878,7 @@ static void apply_ctype(struct position pos, struct ctype *dst, struct ctype *sr
 static void specifier_conflict(struct position pos, int what, struct ident *new)
 {
 	const char *old;
-	if (what & (Set_S | Set_T))
+	if (what & (Set_S | Set_T | Set_BitInt))
 		goto Catch_all;
 	if (what & Set_Char)
 		old = "char";
@@ -1982,6 +2023,37 @@ static struct token *declaration_specifiers(struct token *token, struct decl_sta
 			ctx->autotype = 1;
 			seen |= Set_S;
 		}
+	}
+
+	if (seen & Set_BitInt) {
+		int is_signed = !(seen & Set_Unsigned);
+		long long width = ctx->bitint_width;
+		struct position pos = ctx->bitint_pos;
+
+		if (width <= 0) {
+			sparse_error(pos, "invalid bit width %lld for _BitInt",
+				     width);
+			ctx->ctype.base_type = &bad_ctype;
+		} else if (is_signed && width < 2) {
+			sparse_error(pos,
+				     "signed _BitInt width must be at least 2");
+			ctx->ctype.base_type = &bad_ctype;
+		} else if (!is_signed && width < 1) {
+			sparse_error(
+				pos,
+				"unsigned _BitInt width must be at least 1");
+			ctx->ctype.base_type = &bad_ctype;
+		} else if (width > bits_in_longlonglong) {
+			sparse_error(
+				pos,
+				"_BitInt width %lld exceeds __BITINT_MAXWIDTH__ (%d)",
+				width, bits_in_longlonglong);
+			ctx->ctype.base_type = &bad_ctype;
+		} else {
+			ctx->ctype.base_type =
+				get_bitint_type(width, is_signed);
+		}
+		seen |= Set_S;
 	}
 
 	if (!(seen & Set_S)) {	/* not set explicitly? */
@@ -2425,6 +2497,7 @@ static struct token *handle_bitfield(struct token *token, struct decl_state *ctx
 		}
 		if (Wdefault_bitfield_sign &&
 		    bitfield_type->type != SYM_ENUM &&
+		    !is_bitint_type(bitfield_type) &&
 		    !(bitfield_type->ctype.modifiers & MOD_EXPLICITLY_SIGNED) &&
 		    is_signed) {
 			// The sign of bitfields is unspecified by default.

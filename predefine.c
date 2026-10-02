@@ -128,6 +128,7 @@ void predefined_macros(void)
 	predefine("__STDC_EMBED_EMPTY__", 1, "2");
 
 	predefine("__CHAR_BIT__", 1, "%d", bits_in_char);
+	predefine("__BITINT_MAXWIDTH__", 1, "%d", bits_in_longlonglong);
 	if (funsigned_char)
 		predefine("__CHAR_UNSIGNED__", 1, "1");
 

@@ -260,6 +260,49 @@ static unsigned long long parse_num(const char *nptr, char **end)
 	return strtoull(nptr, end, 0);
 }
 
+#ifdef __SIZEOF_INT128__
+static bool parse_num128(const char *nptr, unsigned long long *lo,
+			 unsigned long long *hi)
+{
+	unsigned __int128 val = 0;
+	int base = 10;
+	const char *p = nptr;
+
+	if (p[0] == '0') {
+		if (tolower((unsigned char)p[1]) == 'x') {
+			base = 16;
+			p += 2;
+		} else if (tolower((unsigned char)p[1]) == 'b') {
+			base = 2;
+			p += 2;
+		} else {
+			base = 8;
+		}
+	}
+	for (; *p; p++) {
+		unsigned int d;
+		unsigned char c = *p;
+
+		if (c >= '0' && c <= '9')
+			d = c - '0';
+		else if (c >= 'a' && c <= 'f')
+			d = c - 'a' + 10;
+		else if (c >= 'A' && c <= 'F')
+			d = c - 'A' + 10;
+		else
+			break;
+		if (d >= (unsigned int)base)
+			break;
+		if (val > (~(unsigned __int128)0 - d) / base)
+			return false;
+		val = val * base + d;
+	}
+	*lo = (unsigned long long)val;
+	*hi = (unsigned long long)(val >> 64);
+	return true;
+}
+#endif
+
 static int is_digit_for_base(int c, int base)
 {
 	if (base == 2)
@@ -417,6 +460,7 @@ static void get_number_value(struct expression *expr, struct token *token)
 	unsigned long long value;
 	char *end;
 	int size = 0, want_unsigned = 0;
+	int is_bitint = 0;
 	int overflow = 0, do_warn = 0;
 	int try_unsigned = 1;
 	int bits;
@@ -444,12 +488,19 @@ static void get_number_value(struct expression *expr, struct token *token)
 		char c = *end++;
 		if (!c) {
 			break;
+		} else if (c == 'w' || c == 'W') {
+			if (is_bitint || size)
+				goto Enoint;
+			if (*end != (c == 'w' ? 'b' : 'B'))
+				goto Enoint;
+			end++;
+			is_bitint = 1;
 		} else if (c == 'u' || c == 'U') {
 			if (want_unsigned)
 				goto Enoint;
 			want_unsigned = 1;
 		} else if (c == 'l' || c == 'L') {
-			if (size)
+			if (size || is_bitint)
 				goto Enoint;
 			size = 1;
 			if (*end == c) {
@@ -462,6 +513,56 @@ static void get_number_value(struct expression *expr, struct token *token)
 		} else {
 			goto Enoint;
 		}
+	}
+	if (is_bitint) {
+		unsigned long long value_hi = 0;
+		int width;
+
+		if (overflow) {
+#ifdef __SIZEOF_INT128__
+			if (!parse_num128(str, &value, &value_hi))
+				goto Ebitint_overflow;
+#else
+			goto Ebitint_overflow;
+#endif
+		}
+		if (standard < STANDARD_C23 && Wpedantic)
+			warning(expr->pos,
+				"bit-precise integer suffix is a C23 feature");
+		if (value_hi != 0) {
+			int mag_bits = 128 - __builtin_clzll(value_hi);
+
+			width = want_unsigned ? mag_bits : (mag_bits + 1);
+			if (width > bits_in_longlonglong)
+				goto Ebitint_overflow;
+		} else if (want_unsigned) {
+			if (value == 0)
+				width = 1;
+			else
+				width = 64 - __builtin_clzll(value);
+		} else {
+			if (value == 0)
+				width = 2;
+			else
+				width = 64 - __builtin_clzll(value) + 1;
+		}
+		expr->type = EXPR_VALUE;
+		expr->flags = CEF_SET_INT;
+		expr->ctype = get_bitint_type(width, !want_unsigned);
+		expr->value = value;
+		expr->value_hi = value_hi;
+		return;
+Ebitint_overflow:
+		sparse_error(expr->pos,
+			     "constant %s is too big for %s_BitInt(%d)",
+			     show_token(token),
+			     want_unsigned ? "unsigned " : "",
+			     bits_in_longlonglong);
+		expr->type = EXPR_VALUE;
+		expr->flags = CEF_SET_ICE;
+		expr->ctype = get_bitint_type(bits_in_longlonglong,
+					      !want_unsigned);
+		return;
 	}
 	if (overflow)
 		goto Eoverflow;
