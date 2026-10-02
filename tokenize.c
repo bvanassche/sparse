@@ -50,6 +50,7 @@ typedef struct {
 	int fd, offset, size;
 	int pos, line, nr;
 	int newline, whitespace;
+	int pushed_char;
 	struct token **tokenlist;
 	struct token *token;
 	unsigned char *buffer;
@@ -446,8 +447,14 @@ got_eof:
  */
 static inline int nextchar(stream_t *stream)
 {
-	int offset = stream->offset;
+	int offset;
 
+	if (stream->pushed_char != -2) {
+		int c = stream->pushed_char;
+		stream->pushed_char = -2;
+		return c;
+	}
+	offset = stream->offset;
 	if (offset < stream->size) {
 		int c = stream->buffer[offset++];
 		static const char special[256] = {
@@ -460,6 +467,19 @@ static inline int nextchar(stream_t *stream)
 		}
 	}
 	return nextchar_slow(stream);
+}
+
+static int peekchar(stream_t *stream)
+{
+	if (stream->pushed_char != -2)
+		return stream->pushed_char;
+	if (stream->offset < stream->size) {
+		int c = stream->buffer[stream->offset];
+		if (c != '\r' && c != '\\')
+			return c;
+	}
+	stream->pushed_char = nextchar_slow(stream);
+	return stream->pushed_char;
 }
 
 struct token eof_token_entry;
@@ -558,8 +578,18 @@ static int get_one_number(int c, int next, stream_t *stream)
 	*p++ = c;
 	for (;;) {
 		long class =  cclass[next + 1];
-		if (!(class & (Dot | Digit | Letter)))
+		if (!(class & (Dot | Digit | Letter))) {
+			if (next == '\'') {
+				int after = peekchar(stream);
+				if (cclass[after + 1] & (Digit | Letter)) {
+					if (p != buffer_end)
+						*p++ = next;
+					next = nextchar(stream);
+					continue;
+				}
+			}
 			break;
+		}
 		if (p != buffer_end)
 			*p++ = next;
 		next = nextchar(stream);
@@ -987,6 +1017,7 @@ static struct token *setup_stream(stream_t *stream, int idx, int fd,
 	stream->offset = 0;
 	stream->size = buf_size;
 	stream->buffer = buf;
+	stream->pushed_char = -2;
 
 	begin = alloc_token(stream);
 	token_type(begin) = TOKEN_STREAMBEGIN;
