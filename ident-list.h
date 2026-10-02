@@ -84,6 +84,15 @@ __IDENT(__FUNCTION___ident, "__FUNCTION__", 0);
 __IDENT(__PRETTY_FUNCTION___ident, "__PRETTY_FUNCTION__", 0);
 __IDENT(__has_include_ident, "__has_include", 0);
 __IDENT(__has_include_next_ident, "__has_include_next", 0);
+__IDENT(__has_embed_ident, "__has_embed", 0);
+IDENT(limit);
+IDENT(prefix);
+IDENT(suffix);
+IDENT(if_empty);
+__IDENT(__limit___ident, "__limit__", 0);
+__IDENT(__prefix___ident, "__prefix__", 0);
+__IDENT(__suffix___ident, "__suffix__", 0);
+__IDENT(__if_empty___ident, "__if_empty__", 0);
 
 /* Sparse commands */
 IDENT_RESERVED(__context__);
