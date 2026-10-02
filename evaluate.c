@@ -87,6 +87,12 @@ static struct symbol *evaluate_symbol_expression(struct expression *expr)
 		expression_error(expr, "undefined identifier '%s'", show_ident(expr->symbol_name));
 		return NULL;
 	}
+	if (sym->underspecified) {
+		expression_error(expr,
+				 "underspecified symbol '%s' used in its own initializer",
+				 show_ident(sym->ident));
+		return NULL;
+	}
 
 	examine_symbol_type(sym);
 
@@ -3853,8 +3859,14 @@ static struct symbol *evaluate_symbol(struct symbol *sym)
 		return NULL;
 
 	/* Evaluate the initializers */
-	if (sym->initializer)
+	if (sym->initializer) {
+		bool mark_underspec = sym->c23_auto;
+		if (mark_underspec)
+			sym->underspecified = 1;
 		evaluate_initializer(sym, &sym->initializer);
+		if (mark_underspec)
+			sym->underspecified = 0;
+	}
 
 	/* And finally, evaluate the body of the symbol too */
 	if (base_type->type == SYM_FN) {
