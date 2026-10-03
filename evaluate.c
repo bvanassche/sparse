@@ -4236,6 +4236,41 @@ static bool has_invalid_constexpr_qualifiers(struct symbol *type)
 	return false;
 }
 
+static void evaluate_cleanup(struct symbol *sym)
+{
+	struct expression *var_expr, *addr_expr, *fn_expr, *call;
+
+	if (!sym->cleanup || sym->cleanup->type != EXPR_SYMBOL)
+		return;
+
+	if (sym->ctype.modifiers & (MOD_TOPLEVEL | MOD_STATIC | MOD_EXTERN)) {
+		sparse_error(sym->pos, "cleanup attribute may only be applied to local variables");
+		sym->cleanup = NULL;
+		return;
+	}
+
+	var_expr = alloc_expression(sym->pos, EXPR_SYMBOL);
+	var_expr->symbol = sym;
+	var_expr->symbol_name = sym->ident;
+	evaluate_expression(var_expr);
+
+	addr_expr = alloc_expression(sym->pos, EXPR_PREOP);
+	addr_expr->op = '&';
+	addr_expr->unop = var_expr;
+	evaluate_expression(addr_expr);
+
+	fn_expr = alloc_expression(sym->cleanup->pos, EXPR_SYMBOL);
+	fn_expr->symbol = sym->cleanup->symbol;
+	fn_expr->symbol_name = sym->cleanup->symbol_name;
+
+	call = alloc_expression(sym->pos, EXPR_CALL);
+	call->fn = fn_expr;
+	add_expression(&call->args, addr_expr);
+	evaluate_call(call);
+
+	sym->cleanup = call;
+}
+
 static struct symbol *evaluate_symbol(struct symbol *sym)
 {
 	struct symbol *base_type;
@@ -4275,6 +4310,9 @@ static struct symbol *evaluate_symbol(struct symbol *sym)
 		if (mark_underspec)
 			sym->underspecified = 0;
 	}
+
+	if (sym->cleanup)
+		evaluate_cleanup(sym);
 
 	/* And finally, evaluate the body of the symbol too */
 	if (base_type->type == SYM_FN) {

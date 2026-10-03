@@ -1512,7 +1512,7 @@ static struct token *attribute_cleanup(struct token *token, struct symbol *attr,
 		else if (token_type(token) != TOKEN_IDENT)
 			sparse_error(token->pos, "argument is not an identifier");
 		token = primary_expression(token, &expr);
-		if (expr && expr->type == EXPR_SYMBOL)
+		if (expr && expr->type == EXPR_SYMBOL && match_op(token, ')'))
 			ctx->cleanup = expr;
 		return expect(token, ')', "after attribute's argument'");
 	}
@@ -2609,7 +2609,8 @@ static struct token *declaration_list(struct token *token, struct symbol_list **
 
 		decl->ctype = ctx.ctype;
 		decl->ctype.modifiers |= mod;
-		decl->cleanup = ctx.cleanup;
+		if (ctx.cleanup)
+			sparse_error(decl->pos, "cleanup attribute may only be applied to local variables");
 		decl->packed = ctx.packed;
 		decl->explicit_alignment = ctx.explicit_alignment;
 		apply_fn_ptr_modifiers(decl, ctx.f_modifiers);
@@ -2681,6 +2682,8 @@ static struct token *parameter_declaration(struct token *token, struct symbol *s
 	apply_fn_ptr_modifiers(sym, ctx.f_modifiers);
 	sym->endpos = token->pos;
 	sym->forced_arg = ctx.forced;
+	if (ctx.cleanup)
+		sparse_error(sym->pos, "cleanup attribute may only be applied to local variables");
 	if (ctx.has_auto || ctx.autotype) {
 		sparse_error(sym->pos,
 			     "parameter '%s' cannot be declared %s",
@@ -3845,6 +3848,7 @@ struct token *external_declaration(struct token *token, struct symbol_list **lis
 	struct symbol *decl;
 	struct decl_state ctx = { .ident = &ident };
 	struct ctype saved;
+	struct expression *saved_cleanup;
 	struct symbol *base_type;
 	unsigned long mod, saved_f_modifiers;
 	unsigned int saved_explicit_alignment, saved_td_align;
@@ -3889,6 +3893,7 @@ struct token *external_declaration(struct token *token, struct symbol_list **lis
 	saved_td_align = ctx.typedef_alignment;
 	saved_f_modifiers = ctx.f_modifiers;
 	saved = ctx.ctype;
+	saved_cleanup = ctx.cleanup;
 	token = declarator(token, &ctx);
 	token = handle_asm_name(token, &ctx);
 	token = handle_attributes(token, &ctx);
@@ -3945,6 +3950,10 @@ struct token *external_declaration(struct token *token, struct symbol_list **lis
 			}
 		}
 	} else if (base_type && base_type->type == SYM_FN) {
+		if (decl->cleanup) {
+			sparse_error(decl->pos, "cleanup attribute may only be applied to local variables");
+			decl->cleanup = NULL;
+		}
 		if (ctx.is_constexpr) {
 			sparse_error(
 				decl->pos,
@@ -4033,6 +4042,9 @@ struct token *external_declaration(struct token *token, struct symbol_list **lis
 				add_symbol(list, decl);
 				fn_local_symbol(decl);
 			}
+		} else if (decl->cleanup) {
+			sparse_error(decl->pos, "cleanup attribute may only be applied to local variables");
+			decl->cleanup = NULL;
 		}
 		check_declaration(decl);
 		if (decl->same_symbol) {
@@ -4161,7 +4173,7 @@ struct token *external_declaration(struct token *token, struct symbol_list **lis
 		ctx.typedef_alignment = saved_td_align;
 		ctx.f_modifiers = saved_f_modifiers;
 		ctx.ctype = saved;
-		ctx.cleanup = NULL;
+		ctx.cleanup = saved_cleanup;
 		ctx.ident_modifiers = 0;
 		token = handle_attributes(token, &ctx);
 		token = declarator(token, &ctx);
@@ -4195,6 +4207,10 @@ struct token *external_declaration(struct token *token, struct symbol_list **lis
 		/* Function declarations are automatically extern unless specifically static */
 		base_type = decl->ctype.base_type;
 		if (!is_typedef && base_type && base_type->type == SYM_FN) {
+			if (decl->cleanup) {
+				sparse_error(decl->pos, "cleanup attribute may only be applied to local variables");
+				decl->cleanup = NULL;
+			}
 			decl->ctype.modifiers |= ctx.f_modifiers;
 			if (standard >= STANDARD_C23 && base_type->kr_args)
 				sparse_error(decl->pos,

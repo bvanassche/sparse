@@ -44,9 +44,12 @@ enum statement_type {
 	STMT_RANGE,
 };
 
+struct cleanup_scope;
+
 struct statement {
 	enum statement_type type;
 	struct position pos;
+	struct cleanup_scope *cleanup_scope;
 	union {
 		struct /* declaration */ {
 			struct symbol_list *declaration;
@@ -138,6 +141,7 @@ extern struct symbol *ctype_integer(int size, int want_unsigned);
 
 extern int inline_function(struct expression *expr, struct symbol *sym);
 extern void uninline(struct symbol *sym);
+extern struct expression *copy_cleanup_expression(struct expression *expr);
 extern void init_parser(int);
 extern void init_parser_finalize(void);
 

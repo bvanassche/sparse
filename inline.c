@@ -35,7 +35,9 @@
 #include "evaluate.h"
 
 static void copy_statement(struct statement *src, struct statement *dst);
+static struct statement *copy_one_statement(struct statement *stmt);
 static struct expression *copy_expression(struct expression *expr);
+static bool copy_allow_unreplaced;
 
 static struct expression * dup_expression(struct expression *expr)
 {
@@ -48,6 +50,7 @@ static struct statement * dup_statement(struct statement *stmt)
 {
 	struct statement *dup = alloc_statement(stmt->pos, stmt->type);
 	*dup = *stmt;
+	dup->cleanup_scope = NULL;
 	return dup;
 }
 
@@ -58,7 +61,8 @@ static struct symbol *copy_symbol(struct position pos, struct symbol *sym)
 	if (sym->ctype.modifiers & (MOD_STATIC | MOD_EXTERN | MOD_TOPLEVEL | MOD_INLINE))
 		return sym;
 	if (!sym->replace) {
-		warning(pos, "unreplaced symbol '%s'", show_ident(sym->ident));
+		if (!copy_allow_unreplaced)
+			warning(pos, "unreplaced symbol '%s'", show_ident(sym->ident));
 		return sym;
 	}
 	return sym->replace;
@@ -77,7 +81,7 @@ static struct symbol *copy_type(struct symbol *type)
 		n = alloc_symbol(type->pos, SYM_NODE);
 		*n = *type;
 		n->ctype.base_type = base;
-		if (base && base->bit_size < 0)
+		if (!copy_allow_unreplaced && base && base->bit_size < 0)
 			n->examined = 0;
 		return n;
 	}
@@ -91,7 +95,8 @@ static struct symbol *copy_type(struct symbol *type)
 		*arr = *type;
 		arr->ctype.base_type = elem;
 		arr->array_size = size;
-		if (type->array_size || elem != type->ctype.base_type)
+		if (!copy_allow_unreplaced &&
+		    (type->array_size || elem != type->ctype.base_type))
 			arr->examined = 0;
 		return arr;
 	}
@@ -114,7 +119,8 @@ static struct symbol *copy_type(struct symbol *type)
 		t = alloc_symbol(type->pos, type->type);
 		*t = *type;
 		t->initializer = init;
-		t->examined = 0;
+		if (!copy_allow_unreplaced)
+			t->examined = 0;
 		return t;
 	}
 	default:
@@ -265,8 +271,20 @@ static struct expression * copy_expression(struct expression *expr)
 
 	/* Statement expression */
 	case EXPR_STATEMENT: {
-		struct statement *stmt = alloc_statement(expr->pos, STMT_COMPOUND);
-		copy_statement(expr->statement, stmt);
+		struct statement *stmt;
+
+		/*
+		 * expand_compound() collapses a compound statement that
+		 * contains a single statement into that statement. Hence,
+		 * after expansion, the statement of a statement expression
+		 * is not necessarily a compound statement.
+		 */
+		if (expr->statement->type == STMT_COMPOUND) {
+			stmt = alloc_statement(expr->pos, STMT_COMPOUND);
+			copy_statement(expr->statement, stmt);
+		} else {
+			stmt = copy_one_statement(expr->statement);
+		}
 		expr = dup_expression(expr);
 		expr->statement = stmt;
 		break;
@@ -382,7 +400,11 @@ static struct asm_operand_list *copy_asm_operands(struct asm_operand_list *in)
 
 	FOR_EACH_PTR(in, old) {
 		struct asm_operand *new = __alloc_asm_operand(0);
-		new->name = old->name;
+		/*
+		 * Copy the constraint flags too since cleanup expressions
+		 * are copied after evaluation and are not re-evaluated.
+		 */
+		*new = *old;
 		new->constraint = copy_expression(old->constraint);
 		new->expr = copy_expression(old->expr);
 		add_ptr_list(&out, new);
@@ -431,6 +453,7 @@ static struct statement *copy_one_statement(struct statement *stmt)
 			if (newsym != sym) {
 				newsym->ctype.base_type = copy_type(newsym->ctype.base_type);
 				newsym->initializer = copy_expression(sym->initializer);
+				newsym->cleanup = copy_expression(sym->cleanup);
 			}
 			add_symbol(&newstmt->declaration, newsym);
 		} END_FOR_EACH_PTR(sym);
@@ -522,6 +545,7 @@ static struct statement *copy_one_statement(struct statement *stmt)
 			if (newsym != sym) {
 				newsym->ctype.base_type = copy_type(newsym->ctype.base_type);
 				newsym->initializer = copy_expression(sym->initializer);
+				newsym->cleanup = copy_expression(sym->cleanup);
 			}
 			add_symbol(&stmt->iterator_syms, newsym);
 		} END_FOR_EACH_PTR(sym);
@@ -591,6 +615,7 @@ static struct symbol *create_copy_symbol(struct symbol *orig)
 		*sym = *orig;
 		sym->bb_target = NULL;
 		sym->pseudo = NULL;
+		sym->cleanup_scope = NULL;
 		set_replace(orig, sym);
 		orig = sym;
 	}
@@ -607,6 +632,184 @@ static struct symbol_list *create_symbol_list(struct symbol_list *src)
 		add_symbol(&dst, newsym);
 	} END_FOR_EACH_PTR(sym);
 	return dst;
+}
+
+static void collect_stmt_local_symbols(struct statement *stmt, struct symbol_list **list);
+
+static void register_local_sym(struct symbol *sym, struct symbol_list **list)
+{
+	if (!sym || sym->replace)
+		return;
+	if (sym->ctype.modifiers & (MOD_STATIC | MOD_EXTERN | MOD_TOPLEVEL | MOD_INLINE))
+		return;
+	add_symbol(list, create_copy_symbol(sym));
+}
+
+static void collect_expr_local_symbols(struct expression *expr, struct symbol_list **list)
+{
+	if (!expr)
+		return;
+	switch (expr->type) {
+	case EXPR_STATEMENT:
+		collect_stmt_local_symbols(expr->statement, list);
+		break;
+	case EXPR_PREOP:
+	case EXPR_POSTOP:
+		collect_expr_local_symbols(expr->unop, list);
+		break;
+	case EXPR_SLICE:
+		collect_expr_local_symbols(expr->base, list);
+		break;
+	case EXPR_BINOP:
+	case EXPR_COMMA:
+	case EXPR_COMPARE:
+	case EXPR_LOGICAL:
+	case EXPR_ASSIGNMENT:
+		collect_expr_local_symbols(expr->left, list);
+		collect_expr_local_symbols(expr->right, list);
+		break;
+	case EXPR_DEREF:
+		collect_expr_local_symbols(expr->deref, list);
+		break;
+	case EXPR_CAST:
+	case EXPR_FORCE_CAST:
+	case EXPR_IMPLIED_CAST:
+	case EXPR_SIZEOF:
+	case EXPR_PTRSIZEOF:
+	case EXPR_ALIGNOF:
+		collect_expr_local_symbols(expr->cast_expression, list);
+		break;
+	case EXPR_SELECT:
+	case EXPR_CONDITIONAL:
+		collect_expr_local_symbols(expr->conditional, list);
+		collect_expr_local_symbols(expr->cond_true, list);
+		collect_expr_local_symbols(expr->cond_false, list);
+		break;
+	case EXPR_CALL: {
+		struct expression *arg;
+		collect_expr_local_symbols(expr->fn, list);
+		FOR_EACH_PTR(expr->args, arg) {
+			collect_expr_local_symbols(arg, list);
+		} END_FOR_EACH_PTR(arg);
+		break;
+	}
+	case EXPR_INITIALIZER: {
+		struct expression *entry;
+		FOR_EACH_PTR(expr->expr_list, entry) {
+			collect_expr_local_symbols(entry, list);
+		} END_FOR_EACH_PTR(entry);
+		break;
+	}
+	case EXPR_INDEX:
+		collect_expr_local_symbols(expr->idx_expression, list);
+		break;
+	case EXPR_IDENTIFIER:
+		collect_expr_local_symbols(expr->ident_expression, list);
+		break;
+	case EXPR_POS:
+		collect_expr_local_symbols(expr->init_expr, list);
+		break;
+	default:
+		break;
+	}
+}
+
+static void collect_stmt_local_symbols(struct statement *stmt, struct symbol_list **list)
+{
+	struct symbol *sym;
+
+	if (!stmt)
+		return;
+	switch (stmt->type) {
+	case STMT_COMPOUND: {
+		struct statement *s;
+		register_local_sym(stmt->ret, list);
+		collect_stmt_local_symbols(stmt->args, list);
+		FOR_EACH_PTR(stmt->stmts, s) {
+			collect_stmt_local_symbols(s, list);
+		} END_FOR_EACH_PTR(s);
+		break;
+	}
+	case STMT_DECLARATION:
+		FOR_EACH_PTR(stmt->declaration, sym) {
+			register_local_sym(sym, list);
+			collect_expr_local_symbols(sym->initializer, list);
+			collect_expr_local_symbols(sym->cleanup, list);
+		} END_FOR_EACH_PTR(sym);
+		break;
+	case STMT_ITERATOR:
+		register_local_sym(stmt->iterator_break, list);
+		register_local_sym(stmt->iterator_continue, list);
+		FOR_EACH_PTR(stmt->iterator_syms, sym) {
+			register_local_sym(sym, list);
+			collect_expr_local_symbols(sym->initializer, list);
+			collect_expr_local_symbols(sym->cleanup, list);
+		} END_FOR_EACH_PTR(sym);
+		collect_stmt_local_symbols(stmt->iterator_pre_statement, list);
+		collect_expr_local_symbols(stmt->iterator_pre_condition, list);
+		collect_stmt_local_symbols(stmt->iterator_statement, list);
+		collect_stmt_local_symbols(stmt->iterator_post_statement, list);
+		collect_expr_local_symbols(stmt->iterator_post_condition, list);
+		break;
+	case STMT_SWITCH:
+		register_local_sym(stmt->switch_break, list);
+		register_local_sym(stmt->switch_case, list);
+		collect_expr_local_symbols(stmt->switch_expression, list);
+		collect_stmt_local_symbols(stmt->switch_statement, list);
+		break;
+	case STMT_CASE:
+		register_local_sym(stmt->case_label, list);
+		collect_stmt_local_symbols(stmt->case_statement, list);
+		break;
+	case STMT_LABEL:
+		register_local_sym(stmt->label_identifier, list);
+		collect_stmt_local_symbols(stmt->label_statement, list);
+		break;
+	case STMT_IF:
+		collect_expr_local_symbols(stmt->if_conditional, list);
+		collect_stmt_local_symbols(stmt->if_true, list);
+		collect_stmt_local_symbols(stmt->if_false, list);
+		break;
+	case STMT_EXPRESSION:
+	case STMT_CONTEXT:
+		collect_expr_local_symbols(stmt->expression, list);
+		break;
+	case STMT_RETURN:
+		collect_expr_local_symbols(stmt->ret_value, list);
+		break;
+	case STMT_GOTO:
+		collect_expr_local_symbols(stmt->goto_expression, list);
+		break;
+	case STMT_ASM: {
+		struct asm_operand *op;
+		FOR_EACH_PTR(stmt->asm_inputs, op) {
+			collect_expr_local_symbols(op->expr, list);
+		} END_FOR_EACH_PTR(op);
+		FOR_EACH_PTR(stmt->asm_outputs, op) {
+			collect_expr_local_symbols(op->expr, list);
+		} END_FOR_EACH_PTR(op);
+		break;
+	}
+	default:
+		break;
+	}
+}
+
+struct expression *copy_cleanup_expression(struct expression *expr)
+{
+	struct symbol_list *syms = NULL;
+	struct expression *dup;
+
+	if (!expr || expr->type != EXPR_STATEMENT)
+		return expr;
+
+	collect_expr_local_symbols(expr, &syms);
+	copy_allow_unreplaced = true;
+	dup = copy_expression(expr);
+	copy_allow_unreplaced = false;
+	unset_replace_list(syms);
+	free_ptr_list(&syms);
+	return dup;
 }
 
 int inline_function(struct expression *expr, struct symbol *sym)
@@ -641,6 +844,7 @@ int inline_function(struct expression *expr, struct symbol *sym)
 			*a = *name;
 			a->bb_target = NULL;
 			a->pseudo = NULL;
+			a->cleanup_scope = NULL;
 			set_replace(name, a);
 			add_symbol(&fn_symbol_list, a);
 			a->initializer = arg;
