@@ -638,6 +638,26 @@ static struct symbol_op object_size_op = {
 	.expand = expand_object_size,
 };
 
+static int evaluate_infer_alloc_token(struct expression *expr)
+{
+	expr->flags |= CEF_SET_ICE;
+	return 1;
+}
+
+static int expand_infer_alloc_token(struct expression *expr, int cost)
+{
+	expr->flags = CEF_SET_ICE;
+	expr->type = EXPR_VALUE;
+	expr->value = 0;
+	expr->taint = 0;
+	return 0;
+}
+
+static struct symbol_op infer_alloc_token_op = {
+	.evaluate = evaluate_infer_alloc_token,
+	.expand = expand_infer_alloc_token,
+};
+
 static int args_va_start(struct expression *expr)
 {
 	struct symbol *sym = expr->fn->ctype;
@@ -865,6 +885,7 @@ static const struct builtin_fn builtins_common[] = {
 	{ "__builtin_index", &string_ctype, 0, { &const_string_ctype, &int_ctype }},
 	{ "__builtin_inf", &double_ctype, 0 },
 	{ "__builtin_inff", &float_ctype, 0 },
+	{ "__builtin_infer_alloc_token", size_t_ctype, 1, .op = &infer_alloc_token_op },
 	{ "__builtin_infl", &ldouble_ctype, 0 },
 	{ "__builtin_isdigit", &int_ctype, 0, { &int_ctype }, .op = &isdigit_op },
 	{ "__builtin_isfinite", &int_ctype, 1, .op = &fp_unop_op },
