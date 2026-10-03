@@ -1,0 +1,28 @@
+# See also https://docs.github.com/en/actions/learn-github-actions/workflow-syntax-for-github-actions
+
+name: Build Linux kernel with sparse
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@main
+
+    - name: install
+      run: sudo ci/install.sh
+
+    - name: build Linux kernel with sparse
+      run: |
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+        ci/build-linux-kernel-with-sparse.sh
