@@ -1736,6 +1736,7 @@ int expand_symbol(struct symbol *sym)
 		return 0;
 
 	retval = expand_expression(sym->initializer);
+	expand_expression(sym->cleanup);
 	/* expand the body of the symbol */
 	if (base_type->type == SYM_FN) {
 		if (base_type->stmt)
@@ -1856,13 +1857,18 @@ static int expand_statement(struct statement *stmt)
 	case STMT_IF:
 		return expand_if_statement(stmt);
 
-	case STMT_ITERATOR:
+	case STMT_ITERATOR: {
+		struct symbol *sym;
+		FOR_EACH_PTR(stmt->iterator_syms, sym) {
+			expand_symbol(sym);
+		} END_FOR_EACH_PTR(sym);
 		expand_expression(stmt->iterator_pre_condition);
 		expand_expression(stmt->iterator_post_condition);
 		expand_statement(stmt->iterator_pre_statement);
 		expand_statement(stmt->iterator_statement);
 		expand_statement(stmt->iterator_post_statement);
 		return SIDE_EFFECTS;
+	}
 
 	case STMT_SWITCH:
 		expand_expression(stmt->switch_expression);

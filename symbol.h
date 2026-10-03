@@ -251,6 +251,7 @@ struct symbol {
 		};
 	};
 	pseudo_t pseudo;
+	struct cleanup_scope *cleanup_scope;
 };
 
 /* Modifiers */

@@ -2039,15 +2039,382 @@ static pseudo_t linearize_one_symbol(struct entrypoint *ep, struct symbol *sym)
 	return value;
 }
 
+struct cleanup_scope {
+	struct cleanup_scope *parent;
+	struct statement *stmt;
+	struct symbol_list *cleanups;
+	int depth;
+};
+
+ALLOCATOR(cleanup_scope, "cleanup scope");
+
+static inline struct cleanup_scope *alloc_cleanup_scope(struct cleanup_scope *parent, struct statement *stmt)
+{
+	struct cleanup_scope *scope = __alloc_cleanup_scope(0);
+	scope->parent = parent;
+	scope->stmt = stmt;
+	scope->cleanups = NULL;
+	scope->depth = parent ? parent->depth + 1 : 0;
+	return scope;
+}
+
+static struct cleanup_scope *cleanup_scope_lca(struct cleanup_scope *s1, struct cleanup_scope *s2)
+{
+	if (!s1 || !s2)
+		return NULL;
+	while (s1->depth > s2->depth)
+		s1 = s1->parent;
+	while (s2->depth > s1->depth)
+		s2 = s2->parent;
+	while (s1 && s2 && s1 != s2) {
+		s1 = s1->parent;
+		s2 = s2->parent;
+	}
+	return s1;
+}
+
+static struct symbol *first_cleanup_decl(struct symbol_list *list)
+{
+	struct symbol *sym;
+
+	FOR_EACH_PTR(list, sym) {
+		if (sym->cleanup)
+			return sym;
+	} END_FOR_EACH_PTR(sym);
+	return NULL;
+}
+
+static bool has_cleanup_decl(struct symbol_list *list)
+{
+	return first_cleanup_decl(list) != NULL;
+}
+
+static struct symbol *bypasses_cleanup_decl(struct cleanup_scope *from, struct cleanup_scope *to)
+{
+	struct cleanup_scope *lca = cleanup_scope_lca(from, to);
+	struct cleanup_scope *s;
+
+	for (s = to; s && s != lca; s = s->parent) {
+		if (!s->stmt)
+			continue;
+		if (s->stmt->type == STMT_DECLARATION) {
+			struct symbol *sym = first_cleanup_decl(s->stmt->declaration);
+			if (sym)
+				return sym;
+		} else if (s->stmt->type == STMT_ITERATOR) {
+			struct symbol *sym = first_cleanup_decl(s->stmt->iterator_syms);
+			if (sym)
+				return sym;
+		}
+	}
+	return NULL;
+}
+
+static int count_cleanups_to(struct cleanup_scope *from, struct cleanup_scope *to)
+{
+	struct cleanup_scope *s;
+	int count = 0;
+
+	for (s = from; s && s != to; s = s->parent)
+		count += symbol_list_size(s->cleanups);
+	return count;
+}
+
+static void prepare_expr_cleanup_scopes(struct expression *expr, struct cleanup_scope *parent);
+
+static void prepare_cleanup_scopes(struct statement *stmt, struct cleanup_scope *parent)
+{
+	if (!stmt)
+		return;
+
+	switch (stmt->type) {
+	case STMT_COMPOUND: {
+		struct cleanup_scope *scope = stmt->cleanup_scope;
+		struct cleanup_scope *cur;
+		struct statement *s;
+		if (!scope) {
+			scope = alloc_cleanup_scope(parent, stmt);
+			stmt->cleanup_scope = scope;
+		} else {
+			scope->parent = parent;
+			scope->depth = parent ? parent->depth + 1 : 0;
+			scope->cleanups = NULL;
+		}
+		if (stmt->ret) {
+			stmt->ret->cleanup_scope = parent;
+			stmt->ret->bb_target = NULL;
+		}
+		if (stmt->args)
+			prepare_cleanup_scopes(stmt->args, scope);
+		cur = scope;
+		FOR_EACH_PTR(stmt->stmts, s) {
+			struct statement *inner = s;
+			prepare_cleanup_scopes(s, cur);
+			while (inner && (inner->type == STMT_LABEL || inner->type == STMT_CASE))
+				inner = (inner->type == STMT_LABEL) ? inner->label_statement : inner->case_statement;
+			if (inner && inner->type == STMT_DECLARATION && inner->cleanup_scope)
+				cur = inner->cleanup_scope;
+		} END_FOR_EACH_PTR(s);
+		break;
+	}
+	case STMT_DECLARATION: {
+		struct cleanup_scope *scope = NULL;
+		struct symbol *sym;
+
+		if (has_cleanup_decl(stmt->declaration)) {
+			scope = stmt->cleanup_scope;
+			if (!scope) {
+				scope = alloc_cleanup_scope(parent, stmt);
+				stmt->cleanup_scope = scope;
+			} else {
+				scope->parent = parent;
+				scope->depth = parent ? parent->depth + 1 : 0;
+				scope->cleanups = NULL;
+			}
+		}
+		FOR_EACH_PTR(stmt->declaration, sym) {
+			sym->initialized = 0;
+			prepare_expr_cleanup_scopes(sym->initializer,
+						    scope ? scope : parent);
+		} END_FOR_EACH_PTR(sym);
+		break;
+	}
+	case STMT_SWITCH: {
+		struct cleanup_scope *scope = stmt->cleanup_scope;
+		if (!scope) {
+			scope = alloc_cleanup_scope(parent, stmt);
+			stmt->cleanup_scope = scope;
+		} else {
+			scope->parent = parent;
+			scope->depth = parent ? parent->depth + 1 : 0;
+			scope->cleanups = NULL;
+		}
+		if (stmt->switch_break) {
+			stmt->switch_break->cleanup_scope = parent;
+			stmt->switch_break->bb_target = NULL;
+		}
+		if (stmt->switch_case) {
+			struct symbol *sym;
+			FOR_EACH_PTR(stmt->switch_case->symbol_list, sym) {
+				sym->bb_target = NULL;
+			} END_FOR_EACH_PTR(sym);
+		}
+		prepare_expr_cleanup_scopes(stmt->switch_expression, parent);
+		prepare_cleanup_scopes(stmt->switch_statement, scope);
+		break;
+	}
+	case STMT_ITERATOR: {
+		struct cleanup_scope *scope = stmt->cleanup_scope;
+		struct symbol *sym;
+		if (!scope) {
+			scope = alloc_cleanup_scope(parent, stmt);
+			stmt->cleanup_scope = scope;
+		} else {
+			scope->parent = parent;
+			scope->depth = parent ? parent->depth + 1 : 0;
+			scope->cleanups = NULL;
+		}
+		if (stmt->iterator_break) {
+			stmt->iterator_break->cleanup_scope = scope;
+			stmt->iterator_break->bb_target = NULL;
+		}
+		if (stmt->iterator_continue) {
+			stmt->iterator_continue->cleanup_scope = scope;
+			stmt->iterator_continue->bb_target = NULL;
+		}
+		FOR_EACH_PTR(stmt->iterator_syms, sym) {
+			sym->initialized = 0;
+			prepare_expr_cleanup_scopes(sym->initializer, scope);
+		} END_FOR_EACH_PTR(sym);
+		prepare_cleanup_scopes(stmt->iterator_pre_statement, scope);
+		prepare_expr_cleanup_scopes(stmt->iterator_pre_condition, scope);
+		prepare_cleanup_scopes(stmt->iterator_statement, scope);
+		prepare_cleanup_scopes(stmt->iterator_post_statement, scope);
+		prepare_expr_cleanup_scopes(stmt->iterator_post_condition, scope);
+		break;
+	}
+	case STMT_LABEL: {
+		struct symbol *label = stmt->label_identifier;
+		if (label) {
+			label->cleanup_scope = parent;
+			label->bb_target = NULL;
+		}
+		prepare_cleanup_scopes(stmt->label_statement, parent);
+		break;
+	}
+	case STMT_CASE:
+		if (stmt->case_label) {
+			stmt->case_label->cleanup_scope = parent;
+			stmt->case_label->bb_target = NULL;
+		}
+		prepare_expr_cleanup_scopes(stmt->case_expression, parent);
+		prepare_expr_cleanup_scopes(stmt->case_to, parent);
+		prepare_cleanup_scopes(stmt->case_statement, parent);
+		break;
+	case STMT_IF:
+		prepare_expr_cleanup_scopes(stmt->if_conditional, parent);
+		prepare_cleanup_scopes(stmt->if_true, parent);
+		prepare_cleanup_scopes(stmt->if_false, parent);
+		break;
+	case STMT_EXPRESSION:
+		prepare_expr_cleanup_scopes(stmt->expression, parent);
+		break;
+	case STMT_RETURN:
+		prepare_expr_cleanup_scopes(stmt->ret_value, parent);
+		break;
+	case STMT_CONTEXT:
+		prepare_expr_cleanup_scopes(stmt->expression, parent);
+		prepare_expr_cleanup_scopes(stmt->context, parent);
+		break;
+	case STMT_RANGE:
+		prepare_expr_cleanup_scopes(stmt->range_expression, parent);
+		prepare_expr_cleanup_scopes(stmt->range_low, parent);
+		prepare_expr_cleanup_scopes(stmt->range_high, parent);
+		break;
+	case STMT_GOTO:
+		prepare_expr_cleanup_scopes(stmt->goto_expression, parent);
+		break;
+	case STMT_ASM: {
+		struct asm_operand *op;
+		FOR_EACH_PTR(stmt->asm_inputs, op) {
+			prepare_expr_cleanup_scopes(op->expr, parent);
+		} END_FOR_EACH_PTR(op);
+		FOR_EACH_PTR(stmt->asm_outputs, op) {
+			prepare_expr_cleanup_scopes(op->expr, parent);
+		} END_FOR_EACH_PTR(op);
+		break;
+	}
+	default:
+		break;
+	}
+}
+
+static void prepare_expr_cleanup_scopes(struct expression *expr, struct cleanup_scope *parent)
+{
+	if (!expr)
+		return;
+	switch (expr->type) {
+	case EXPR_STATEMENT:
+		prepare_cleanup_scopes(expr->statement, parent);
+		break;
+	case EXPR_BINOP:
+	case EXPR_COMMA:
+	case EXPR_COMPARE:
+	case EXPR_LOGICAL:
+	case EXPR_ASSIGNMENT:
+		prepare_expr_cleanup_scopes(expr->left, parent);
+		prepare_expr_cleanup_scopes(expr->right, parent);
+		break;
+	case EXPR_PREOP:
+	case EXPR_POSTOP:
+		prepare_expr_cleanup_scopes(expr->unop, parent);
+		break;
+	case EXPR_CONDITIONAL:
+	case EXPR_SELECT:
+		prepare_expr_cleanup_scopes(expr->conditional, parent);
+		prepare_expr_cleanup_scopes(expr->cond_true, parent);
+		prepare_expr_cleanup_scopes(expr->cond_false, parent);
+		break;
+	case EXPR_CALL: {
+		struct expression *arg;
+		prepare_expr_cleanup_scopes(expr->fn, parent);
+		FOR_EACH_PTR(expr->args, arg) {
+			prepare_expr_cleanup_scopes(arg, parent);
+		} END_FOR_EACH_PTR(arg);
+		break;
+	}
+	case EXPR_CAST:
+	case EXPR_FORCE_CAST:
+	case EXPR_IMPLIED_CAST:
+	case EXPR_SIZEOF:
+	case EXPR_PTRSIZEOF:
+	case EXPR_ALIGNOF:
+		prepare_expr_cleanup_scopes(expr->cast_expression, parent);
+		break;
+	case EXPR_SLICE:
+		prepare_expr_cleanup_scopes(expr->base, parent);
+		break;
+	case EXPR_DEREF:
+		prepare_expr_cleanup_scopes(expr->deref, parent);
+		break;
+	case EXPR_INITIALIZER: {
+		struct expression *entry;
+		FOR_EACH_PTR(expr->expr_list, entry) {
+			prepare_expr_cleanup_scopes(entry, parent);
+		} END_FOR_EACH_PTR(entry);
+		break;
+	}
+	case EXPR_POS:
+		prepare_expr_cleanup_scopes(expr->init_expr, parent);
+		break;
+	case EXPR_INDEX:
+		prepare_expr_cleanup_scopes(expr->idx_expression, parent);
+		break;
+	case EXPR_IDENTIFIER:
+		prepare_expr_cleanup_scopes(expr->ident_expression, parent);
+		break;
+	case EXPR_GENERIC: {
+		struct type_expression *map;
+		prepare_expr_cleanup_scopes(expr->control, parent);
+		prepare_expr_cleanup_scopes(expr->def, parent);
+		for (map = expr->map; map; map = map->next)
+			prepare_expr_cleanup_scopes(map->expr, parent);
+		break;
+	}
+	case EXPR_OFFSETOF:
+		prepare_expr_cleanup_scopes(expr->down, parent);
+		if (expr->op != '.')
+			prepare_expr_cleanup_scopes(expr->index, parent);
+		break;
+	case EXPR_HAS_ATTRIBUTE:
+		prepare_expr_cleanup_scopes(expr->has_attr_expr, parent);
+		break;
+	default:
+		break;
+	}
+}
+
+static void emit_cleanups_to(struct entrypoint *ep, struct cleanup_scope *target_scope)
+{
+	struct cleanup_scope *saved_scope = ep->cleanup_scope;
+	struct cleanup_scope *scope;
+
+	if (!ep->active || !bb_reachable(ep->active))
+		return;
+
+	for (scope = saved_scope; scope && scope != target_scope; scope = scope->parent) {
+		struct symbol *sym;
+		ep->cleanup_scope = scope;
+		FOR_EACH_PTR_REVERSE(scope->cleanups, sym) {
+			if (sym->cleanup && sym->cleanup->ctype) {
+				struct expression *cleanup = copy_cleanup_expression(sym->cleanup);
+				prepare_expr_cleanup_scopes(cleanup, scope);
+				linearize_expression(ep, cleanup);
+			}
+		} END_FOR_EACH_PTR_REVERSE(sym);
+	}
+	ep->cleanup_scope = saved_scope;
+}
+
 static pseudo_t linearize_compound_statement(struct entrypoint *ep, struct statement *stmt)
 {
+	struct cleanup_scope *scope = stmt->cleanup_scope;
 	pseudo_t pseudo;
 	struct statement *s;
 
+	if (!scope) {
+		prepare_cleanup_scopes(stmt, ep->cleanup_scope);
+		scope = stmt->cleanup_scope;
+	}
+
+	ep->cleanup_scope = scope;
 	pseudo = VOID;
 	FOR_EACH_PTR(stmt->stmts, s) {
 		pseudo = linearize_statement(ep, s);
 	} END_FOR_EACH_PTR(s);
+
+	emit_cleanups_to(ep, scope->parent);
+	ep->cleanup_scope = scope->parent;
 
 	return pseudo;
 }
@@ -2266,8 +2633,14 @@ static pseudo_t linearize_declaration(struct entrypoint *ep, struct statement *s
 
 	concat_symbol_list(stmt->declaration, &ep->syms);
 
+	if (stmt->cleanup_scope) {
+		stmt->cleanup_scope->cleanups = NULL;
+		ep->cleanup_scope = stmt->cleanup_scope;
+	}
 	FOR_EACH_PTR(stmt->declaration, sym) {
 		linearize_one_symbol(ep, sym);
+		if (sym->cleanup && ep->cleanup_scope)
+			add_symbol(&ep->cleanup_scope->cleanups, sym);
 	} END_FOR_EACH_PTR(sym);
 	return VOID;
 }
@@ -2277,10 +2650,10 @@ static pseudo_t linearize_return(struct entrypoint *ep, struct statement *stmt)
 	struct expression *expr = stmt->expression;
 	struct symbol *ret = stmt->ret_target;
 	struct basic_block *bb_return = get_bound_block(ep, ret);
-	struct basic_block *active;
 	pseudo_t src = linearize_expression(ep, expr);
-	active = ep->active;
-	if (active && !is_void_type(ret)) {
+
+	emit_cleanups_to(ep, ret ? ret->cleanup_scope : NULL);
+	if (ep->active && !is_void_type(ret)) {
 		add_return(ep, bb_return, ret, src);
 	}
 	add_goto(ep, bb_return);
@@ -2311,10 +2684,27 @@ static pseudo_t linearize_switch(struct entrypoint *ep, struct statement *stmt)
 	add_one_insn(ep, switch_ins);
 	finish_block(ep);
 
+	struct cleanup_scope *switch_scope = stmt->cleanup_scope;
+	if (!switch_scope) {
+		prepare_cleanup_scopes(stmt, ep->cleanup_scope);
+		switch_scope = stmt->cleanup_scope;
+	}
+	ep->cleanup_scope = switch_scope;
+	stmt->switch_break->cleanup_scope = switch_scope->parent;
+
 	default_case = NULL;
 	FOR_EACH_PTR(stmt->switch_case->symbol_list, sym) {
 		struct statement *case_stmt = sym->stmt;
-		struct basic_block *bb_case = get_bound_block(ep, sym);
+		struct symbol *bypass = bypasses_cleanup_decl(switch_scope, sym->cleanup_scope);
+		struct basic_block *bb_case;
+
+		if (bypass) {
+			sparse_error(case_stmt->pos,
+				     "jump bypasses initialization of variable '%s' with cleanup attribute",
+				     show_ident(bypass->ident));
+			continue;
+		}
+		bb_case = get_bound_block(ep, sym);
 
 		if (!case_stmt->case_expression) {
 			default_case = bb_case;
@@ -2349,6 +2739,7 @@ static pseudo_t linearize_switch(struct entrypoint *ep, struct statement *stmt)
 
 	/* And linearize the actual statement */
 	linearize_statement(ep, stmt->switch_statement);
+	emit_cleanups_to(ep, switch_scope->parent);
 	set_activeblock(ep, switch_end);
 
 	if (!default_case)
@@ -2360,6 +2751,7 @@ static pseudo_t linearize_switch(struct entrypoint *ep, struct statement *stmt)
 	add_bb(&active->children, default_case);
 	sort_switch_cases(switch_ins);
 
+	ep->cleanup_scope = switch_scope->parent;
 	return VOID;
 }
 
@@ -2372,9 +2764,18 @@ static pseudo_t linearize_iterator(struct entrypoint *ep, struct statement *stmt
 	struct expression *post_condition = stmt->iterator_post_condition;
 	struct basic_block *loop_top, *loop_body, *loop_continue, *loop_end;
 	struct symbol *sym;
+	struct cleanup_scope *iter_scope = stmt->cleanup_scope;
+	if (!iter_scope) {
+		prepare_cleanup_scopes(stmt, ep->cleanup_scope);
+		iter_scope = stmt->cleanup_scope;
+	}
+
+	ep->cleanup_scope = iter_scope;
 
 	FOR_EACH_PTR(stmt->iterator_syms, sym) {
 		linearize_one_symbol(ep, sym);
+		if (sym->cleanup)
+			add_symbol(&iter_scope->cleanups, sym);
 	} END_FOR_EACH_PTR(sym);
 	concat_symbol_list(stmt->iterator_syms, &ep->syms);
 	linearize_statement(ep, pre_statement);
@@ -2382,6 +2783,9 @@ static pseudo_t linearize_iterator(struct entrypoint *ep, struct statement *stmt
 	loop_body = loop_top = alloc_basic_block(ep, stmt->pos);
 	loop_continue = alloc_basic_block(ep, stmt->pos);
 	loop_end = alloc_basic_block(ep, stmt->pos);
+
+	stmt->iterator_continue->cleanup_scope = iter_scope;
+	stmt->iterator_break->cleanup_scope = iter_scope;
 
 	/* An empty post-condition means that it's the same as the pre-condition */
 	if (!post_condition) {
@@ -2406,6 +2810,9 @@ static pseudo_t linearize_iterator(struct entrypoint *ep, struct statement *stmt
 	else
 		linearize_cond_branch(ep, post_condition, loop_top, loop_end);
 	set_activeblock(ep, loop_end);
+
+	emit_cleanups_to(ep, iter_scope->parent);
+	ep->cleanup_scope = iter_scope->parent;
 
 	return VOID;
 }
@@ -2464,28 +2871,72 @@ static pseudo_t linearize_statement(struct entrypoint *ep, struct statement *stm
 		struct expression *expr;
 		struct instruction *goto_ins;
 		struct basic_block *active;
+		struct cleanup_scope *common_lca = NULL;
+		int expected_cleanups = -1;
 		pseudo_t pseudo;
 
 		active = ep->active;
 		if (!bb_reachable(active))
 			break;
 
-		if (stmt->goto_label) {
-			add_goto(ep, get_bound_block(ep, stmt->goto_label));
+		sym = stmt->goto_label;
+		expr = stmt->goto_expression;
+		if (!sym && expr && expr->type == EXPR_LABEL)
+			sym = expr->label_symbol;
+
+		if (sym) {
+			struct symbol *bypass = bypasses_cleanup_decl(ep->cleanup_scope, sym->cleanup_scope);
+			if (bypass) {
+				sparse_error(stmt->pos,
+					     "jump bypasses initialization of variable '%s' with cleanup attribute",
+					     show_ident(bypass->ident));
+				add_unreachable(ep);
+				break;
+			}
+			emit_cleanups_to(ep, cleanup_scope_lca(ep->cleanup_scope, sym->cleanup_scope));
+			add_goto(ep, get_bound_block(ep, sym));
 			break;
 		}
 
-		expr = stmt->goto_expression;
 		if (!expr)
 			break;
 
-		/* This can happen as part of simplification */
-		if (expr->type == EXPR_LABEL) {
-			add_goto(ep, get_bound_block(ep, expr->label_symbol));
+		pseudo = linearize_expression(ep, expr);
+		active = ep->active;
+		if (!bb_reachable(active))
 			break;
+
+		FOR_EACH_PTR(stmt->target_list, sym) {
+			struct symbol *bypass = bypasses_cleanup_decl(ep->cleanup_scope, sym->cleanup_scope);
+			struct cleanup_scope *lca;
+			int n;
+
+			if (bypass) {
+				sparse_error(stmt->pos,
+					     "jump bypasses initialization of variable '%s' with cleanup attribute",
+					     show_ident(bypass->ident));
+				add_unreachable(ep);
+				goto out_goto;
+			}
+			lca = cleanup_scope_lca(ep->cleanup_scope, sym->cleanup_scope);
+			n = count_cleanups_to(ep->cleanup_scope, lca);
+			if (expected_cleanups < 0) {
+				expected_cleanups = n;
+				common_lca = lca;
+			} else if (n != expected_cleanups) {
+				sparse_error(stmt->pos, "computed goto crosses cleanup scope");
+				add_unreachable(ep);
+				goto out_goto;
+			}
+		} END_FOR_EACH_PTR(sym);
+
+		if (expected_cleanups > 0) {
+			emit_cleanups_to(ep, common_lca);
+			active = ep->active;
+			if (!bb_reachable(active))
+				break;
 		}
 
-		pseudo = linearize_expression(ep, expr);
 		goto_ins = alloc_instruction(OP_COMPUTEDGOTO, 0);
 		use_pseudo(goto_ins, pseudo, &goto_ins->src);
 		add_one_insn(ep, goto_ins);
@@ -2494,11 +2945,12 @@ static pseudo_t linearize_statement(struct entrypoint *ep, struct statement *stm
 			struct basic_block *bb_computed = get_bound_block(ep, sym);
 			struct multijmp *jmp = alloc_multijmp(bb_computed, 1, 0);
 			add_multijmp(&goto_ins->multijmp_list, jmp);
-			add_bb(&bb_computed->parents, ep->active);
+			add_bb(&bb_computed->parents, active);
 			add_bb(&active->children, bb_computed);
 		} END_FOR_EACH_PTR(sym);
 
 		finish_block(ep);
+	out_goto:
 		break;
 	}
 
@@ -2612,6 +3064,8 @@ static struct entrypoint *linearize_fn(struct symbol *sym, struct symbol *base_t
 
 	if (!stmt || sym->bogus_linear)
 		return NULL;
+
+	prepare_cleanup_scopes(stmt, NULL);
 
 	ep = alloc_entrypoint();
 	ep->name = sym;

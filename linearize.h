@@ -321,6 +321,9 @@ static inline void replace_bb_in_list(struct basic_block_list **list,
 	replace_ptr_list_entry((struct ptr_list **)list, old, new, count);
 }
 
+struct cleanup_scope;
+DECLARE_ALLOCATOR(cleanup_scope);
+
 struct entrypoint {
 	struct symbol *name;
 	struct symbol_list *syms;
@@ -329,6 +332,7 @@ struct entrypoint {
 	struct basic_block *active;
 	struct instruction *entry;
 	unsigned int dom_levels;	/* max levels in the dom tree */
+	struct cleanup_scope *cleanup_scope;
 };
 
 extern void insert_select(struct basic_block *bb, struct instruction *br, struct instruction *phi, pseudo_t if_true, pseudo_t if_false);
