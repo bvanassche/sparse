@@ -477,6 +477,8 @@ static inline int is_bool_type(struct symbol *type)
 {
 	if (type->type == SYM_NODE)
 		type = type->ctype.base_type;
+	if (type->type == SYM_BITFIELD)
+		type = type->ctype.base_type;
 	return type == &bool_ctype;
 }
 

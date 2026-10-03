@@ -934,6 +934,8 @@ static struct symbol *bitfield_base_type(struct symbol *sym)
 			base = base->ctype.base_type;
 		if (base->type == SYM_BITFIELD) {
 			base = base->ctype.base_type;
+			if (base->bit_size < bits_in_char)
+				base = &uchar_ctype;
 			if (sym->packed) {
 				int size = bits_to_bytes(sym->bit_offset + sym->bit_size);
 				sym = __alloc_symbol(0);

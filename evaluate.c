@@ -1406,12 +1406,12 @@ static int check_assignment_types(struct symbol *target, struct expression **rp,
 				return 1;
 		} else if (!(sclass & TYPE_RESTRICT))
 			goto Cast;
-                if (t == &bool_ctype) {
-                        if (is_fouled_type(s))
-                                warning((*rp)->pos, "%s degrades to integer",
-                                        show_typename(s->ctype.base_type));
-                        goto Cast;
-                }
+		if (is_bool_type(t)) {
+			if (is_fouled_type(s))
+				warning((*rp)->pos, "%s degrades to integer",
+					show_typename(s->ctype.base_type));
+			goto Cast;
+		}
 		*typediff = "different base types";
 		return 0;
 	}
@@ -1475,7 +1475,7 @@ static int check_assignment_types(struct symbol *target, struct expression **rp,
 
 	if (tclass & TYPE_NUM) {
 		/* XXX: need to turn into comparison with NULL */
-		if (t == &bool_ctype && (sclass & TYPE_PTR))
+		if (is_bool_type(t) && (sclass & TYPE_PTR))
 			goto Cast;
 		*typediff = "different base types";
 		return 0;
@@ -3064,7 +3064,7 @@ static struct symbol *evaluate_cast(struct expression *expr)
 			warning(expr->pos, "cast to %s",
 				show_typename(ttype));
 		if (sclass & TYPE_RESTRICT) {
-			if (ttype == &bool_ctype) {
+			if (is_bool_type(ttype)) {
 				if (sclass & TYPE_FOULED)
 					warning(expr->pos, "%s degrades to integer",
 						show_typename(stype));
@@ -3111,7 +3111,7 @@ static struct symbol *evaluate_cast(struct expression *expr)
 		}
 	}
 
-	if (ttype == &bool_ctype)
+	if (is_bool_type(ttype))
 		cast_to_bool(expr);
 
 	// checks pointers to restricted

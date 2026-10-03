@@ -12,14 +12,11 @@ struct bfb foo(struct bfb s)
 
 /*
  * check-name: bitfield-bool-layout
- * check-description: given that bool is here 1-bit wide
- *	each field here above completely 'fill' a bool.
- *	Thus 3 bools need to be allocated, but since the
- *	alignment is 1-byte the result has a size of 3
- *	bytes, 24 bits thus instead of 8.
+ * check-description: Verify that consecutive _Bool bitfields pack into a
+ *	single 1-byte (8-bit) storage unit rather than allocating a separate
+ *	byte per bitfield (24 bits).
  * check-command: test-linearize -Wno-decl $file
  *
- * check-known-to-fail
  * check-output-ignore
  * check-output-excludes: ret\\.24
  * check-output-contains: ret\\.8

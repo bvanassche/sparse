@@ -113,6 +113,8 @@ static int bitfield_base_size(struct symbol *sym)
 		sym = sym->ctype.base_type;
 	if (sym->type == SYM_BITFIELD)
 		sym = sym->ctype.base_type;
+	if (sym->bit_size < bits_in_char)
+		return bits_in_char;
 	return sym->bit_size;
 }
 
