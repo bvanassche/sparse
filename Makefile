@@ -288,7 +288,7 @@ validation/%: $(PROGRAMS) FORCE
 
 
 clean: clean-check
-	@rm -f *.[oa] .*.d $(PROGRAMS) version.h
+	@rm -f -- *.[oa] .*.d $(PROGRAMS) version.h
 clean-check:
 	@echo "  CLEAN"
 	@find validation/ \( -name "*.c.output.*" \
