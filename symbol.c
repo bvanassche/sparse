@@ -541,6 +541,27 @@ static struct symbol *examine_pointer_type(struct symbol *sym)
 	return sym;
 }
 
+struct symbol *strip_array_qualifiers(struct symbol *type)
+{
+	struct symbol *elem, *copy;
+	unsigned long strip;
+
+	if (!type)
+		return NULL;
+	if (type->type != SYM_ARRAY && type->type != SYM_NODE)
+		return type;
+	elem = strip_array_qualifiers(type->ctype.base_type);
+	strip = type->ctype.modifiers & MOD_QUALIFIER;
+	if (elem == type->ctype.base_type && !strip && !type->ctype.as)
+		return type;
+	copy = alloc_symbol(type->pos, type->type);
+	*copy = *type;
+	copy->ctype.base_type = elem;
+	copy->ctype.modifiers &= ~MOD_QUALIFIER;
+	copy->ctype.as = NULL;
+	return copy;
+}
+
 static struct symbol *examine_typeof_helper(struct symbol *sym, bool qual)
 {
 	struct symbol *base = evaluate_expression(sym->initializer);
@@ -548,11 +569,16 @@ static struct symbol *examine_typeof_helper(struct symbol *sym, bool qual)
 
 	if (!base)
 		base = &bad_ctype;
-	if (base->type == SYM_NODE) {
+	while (base->type == SYM_NODE) {
 		mod |= base->ctype.modifiers & MOD_TYPEOF;
-		if (!qual)
-			mod &= ~MOD_QUALIFIER;
 		base = base->ctype.base_type;
+	}
+	if (!qual) {
+		mod &= ~MOD_QUALIFIER;
+		if (base->type != SYM_ARRAY)
+			mod &= ~MOD_ATOMIC;
+		sym->ctype.as = NULL;
+		base = strip_array_qualifiers(base);
 	}
 	if (base->type == SYM_BITFIELD)
 		warning(base->pos, "typeof applied to bitfield type");

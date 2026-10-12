@@ -1070,6 +1070,14 @@ static struct token *typeof_specifier_helper(struct token *token, struct symbol 
 	if (lookup_type(token->next)) {
 		struct symbol *sym;
 		token = typename(token->next, &sym, NULL);
+		sym = examine_symbol_type(sym);
+		if (!qual) {
+			sym->ctype.modifiers &= ~MOD_QUALIFIER;
+			if (!sym->ctype.base_type || sym->ctype.base_type->type != SYM_ARRAY)
+				sym->ctype.modifiers &= ~MOD_ATOMIC;
+			sym->ctype.as = NULL;
+			sym->ctype.base_type = strip_array_qualifiers(sym->ctype.base_type);
+		}
 		ctx->ctype.base_type = sym->ctype.base_type;
 		apply_ctype(token->pos, &ctx->ctype, &sym->ctype);
 	} else {
