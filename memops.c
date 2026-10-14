@@ -252,14 +252,14 @@ static void kill_dominated_stores(struct basic_block *bb)
 
 				if (bb_list_size(par->children) != 1)
 					goto next_parent;
-				FOR_EACH_PTR(par->insns, dom) {
+				FOR_EACH_PTR_REVERSE(par->insns, dom) {
 					if (!dom->bb)
 						continue;
 					if (dom == insn)
 						goto next_parent;
 					if (!try_to_kill_store(insn, dom, local))
 						goto next_parent;
-				} END_FOR_EACH_PTR(dom);
+				} END_FOR_EACH_PTR_REVERSE(dom);
 next_parent:
 				;
 			} END_FOR_EACH_PTR(par);

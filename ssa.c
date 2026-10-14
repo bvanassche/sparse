@@ -139,6 +139,7 @@ static void ssa_convert_one_var(struct entrypoint *ep, struct symbol *var)
 	bool local = true;
 	int nbr_stores = 0;
 	int nbr_uses   = 0;
+	bool same_size = true;
 	pseudo_t addr;
 
 	/* Never used as a symbol? */
@@ -172,6 +173,8 @@ static void ssa_convert_one_var(struct entrypoint *ep, struct symbol *var)
 			}
 			/* fall through */
 		case OP_LOAD:
+			if (insn->size != var->bit_size || insn->offset != 0)
+				same_size = false;
 			if (local) {
 				if (!samebb)
 					samebb = bb;
@@ -196,6 +199,9 @@ static void ssa_convert_one_var(struct entrypoint *ep, struct symbol *var)
 		rewrite_local_var(samebb, addr, nbr_stores, nbr_uses);
 		return;
 	}
+
+	if (!same_size)
+		goto external_visibility;
 
 	idf_compute(ep, &idf, alpha);
 	FOR_EACH_PTR(idf, bb) {
