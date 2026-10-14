@@ -733,6 +733,24 @@ static struct symbol_op va_start_op = {
 	.evaluate = evaluate_va_start,
 };
 
+static int args_counted_by_ref(struct expression *expr)
+{
+	return eval_args(expr, 1);
+}
+
+static int expand_counted_by_ref(struct expression *expr, int cost)
+{
+	expr->type = EXPR_VALUE;
+	expr->value = 0;
+	expr->taint = 0;
+	return 0;
+}
+
+static struct symbol_op counted_by_ref_op = {
+	.args = args_counted_by_ref,
+	.expand = expand_counted_by_ref,
+};
+
 static int evaluate_strlen(struct expression *expr)
 {
 	struct expression *arg = first_expression(expr->args);
@@ -852,6 +870,7 @@ static const struct builtin_fn builtins_common[] = {
 	{ "__builtin_add_overflow", &bool_ctype, 1, .op = &overflow_op },
 	{ "__builtin_add_overflow_p", &bool_ctype, 1, .op = &overflow_p_op },
 	{ "__builtin_alloca", &ptr_ctype, 0, { size_t_ctype }},
+	{ "__builtin_alloca_uninitialized", &ptr_ctype, 0, { size_t_ctype }},
 	{ "__builtin_bcmp", &int_ctype , 0, { &const_ptr_ctype, &const_ptr_ctype, size_t_ctype }},
 	{ "__builtin_bcopy", &void_ctype, 0, { &const_ptr_ctype, &ptr_ctype, size_t_ctype }},
 	{ "__builtin_bswap16", &ushort_ctype, 0, { &ushort_ctype }, .op = &bswap_op },
@@ -859,6 +878,7 @@ static const struct builtin_fn builtins_common[] = {
 	{ "__builtin_bswap64", &ullong_ctype, 0, { &ullong_ctype }, .op = &bswap_op },
 	{ "__builtin_bzero", &void_ctype, 0, { &ptr_ctype, size_t_ctype }},
 	{ "__builtin_calloc", &ptr_ctype, 0, { size_t_ctype, size_t_ctype }},
+	{ "__builtin_counted_by_ref", &ptr_ctype, 1, .op = &counted_by_ref_op },
 	{ "__builtin_clrsb", &int_ctype, 0, { &int_ctype }, .op = &clrsb_op },
 	{ "__builtin_clrsbl", &int_ctype, 0, { &long_ctype }, .op = &clrsb_op },
 	{ "__builtin_clrsbll", &int_ctype, 0, { &llong_ctype }, .op = &clrsb_op },
@@ -868,6 +888,7 @@ static const struct builtin_fn builtins_common[] = {
 	{ "__builtin_ctz", &int_ctype, 0, { &int_ctype }, .op = &ctz_op },
 	{ "__builtin_ctzl", &int_ctype, 0, { &long_ctype }, .op = &ctz_op },
 	{ "__builtin_ctzll", &int_ctype, 0, { &llong_ctype }, .op = &ctz_op },
+	{ "__builtin_dynamic_object_size", size_t_ctype, 0, { &const_ptr_ctype, &int_ctype }, .op = &object_size_op},
 	{ "__builtin_exit", &void_ctype, 0, { &int_ctype }},
 	{ "__builtin_extract_return_addr", &ptr_ctype, 0, { &ptr_ctype }},
 	{ "__builtin_fabs", &double_ctype, 0, { &double_ctype }},
@@ -961,6 +982,7 @@ static const struct builtin_fn builtins_common[] = {
 	{ "__builtin_strstr", &string_ctype, 0, { &const_string_ctype, &const_string_ctype }},
 	{ "__builtin_sub_overflow", &bool_ctype, 1, .op = &overflow_op },
 	{ "__builtin_sub_overflow_p", &bool_ctype, 1, .op = &overflow_p_op },
+	{ "__builtin_thread_pointer", &ptr_ctype, 0 },
 	{ "__builtin_trap", &void_ctype, 0 },
 	{ "__builtin_uadd_overflow", &bool_ctype, 0, { &uint_ctype, &uint_ctype, &uint_ptr_ctype }},
 	{ "__builtin_uaddl_overflow", &bool_ctype, 0, { &ulong_ctype, &ulong_ctype, &ulong_ptr_ctype }},
