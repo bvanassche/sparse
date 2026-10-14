@@ -434,30 +434,30 @@ static void stor_sym_init(struct symbol *sym)
 
 static const char *stor_op_name(struct storage *s)
 {
-	static char name[32];
+	static char name[256];
 
 	switch (s->type) {
 	case STOR_PSEUDO:
-		strcpy(name, pretty_offset((int) pseudo_offset(s)));
+		snprintf(name, sizeof(name), "%s", pretty_offset((int) pseudo_offset(s)));
 		break;
 	case STOR_ARG:
-		strcpy(name, pretty_offset((int) arg_offset(s)));
+		snprintf(name, sizeof(name), "%s", pretty_offset((int) arg_offset(s)));
 		break;
 	case STOR_SYM:
-		strcpy(name, show_ident(s->sym->ident));
+		snprintf(name, sizeof(name), "%s", show_ident(s->sym->ident));
 		break;
 	case STOR_REG:
-		strcpy(name, s->reg->name);
+		snprintf(name, sizeof(name), "%s", s->reg->name);
 		break;
 	case STOR_VALUE:
-		sprintf(name, "$%lld", s->value);
+		snprintf(name, sizeof(name), "$%lld", s->value);
 		break;
 	case STOR_LABEL:
-		sprintf(name, "%s.L%d", s->flags & STOR_LABEL_VAL ? "$" : "",
+		snprintf(name, sizeof(name), "%s.L%d", s->flags & STOR_LABEL_VAL ? "$" : "",
 			s->label);
 		break;
 	case STOR_LABELSYM:
-		sprintf(name, "%s.LS%p", s->flags & STOR_LABEL_VAL ? "$" : "",
+		snprintf(name, sizeof(name), "%s.LS%p", s->flags & STOR_LABEL_VAL ? "$" : "",
 			s->labelsym);
 		break;
 	}
@@ -707,27 +707,27 @@ static void emit_section(const char *s)
 
 static void emit_insn_atom(struct function *f, struct atom *atom)
 {
-	char s[128];
-	char comment[64];
+	char s[512];
+	char comment[128];
 	struct storage *op1 = atom->op1;
 	struct storage *op2 = atom->op2;
 
 	if (atom->comment[0])
-		sprintf(comment, "\t\t# %s", atom->comment);
+		snprintf(comment, sizeof(comment), "\t\t# %s", atom->comment);
 	else
 		comment[0] = 0;
 
 	if (atom->op2) {
-		char tmp[16];
-		strcpy(tmp, stor_op_name(op1));
-		sprintf(s, "\t%s\t%s, %s%s\n",
+		char tmp[256];
+		snprintf(tmp, sizeof(tmp), "%s", stor_op_name(op1));
+		snprintf(s, sizeof(s), "\t%s\t%s, %s%s\n",
 			atom->insn, tmp, stor_op_name(op2), comment);
 	} else if (atom->op1)
-		sprintf(s, "\t%s\t%s%s%s\n",
+		snprintf(s, sizeof(s), "\t%s\t%s%s%s\n",
 			atom->insn, stor_op_name(op1),
 			comment[0] ? "\t" : "", comment);
 	else
-		sprintf(s, "\t%s\t%s%s\n",
+		snprintf(s, sizeof(s), "\t%s\t%s%s\n",
 			atom->insn,
 			comment[0] ? "\t\t" : "", comment);
 
@@ -941,16 +941,16 @@ static void emit_scalar(struct expression *expr, unsigned int bit_size)
 static void emit_global_noinit(const char *name, unsigned long modifiers,
 			       unsigned long alignment, unsigned int byte_size)
 {
-	char s[64];
+	char s[256];
 
 	if (modifiers & MOD_STATIC) {
-		sprintf(s, "\t.local\t%s\n", name);
+		snprintf(s, sizeof(s), "\t.local\t%s\n", name);
 		textbuf_push(&unit_post_text, s);
 	}
 	if (alignment)
-		sprintf(s, "\t.comm\t%s,%d,%lu\n", name, byte_size, alignment);
+		snprintf(s, sizeof(s), "\t.comm\t%s,%d,%lu\n", name, byte_size, alignment);
 	else
-		sprintf(s, "\t.comm\t%s,%d\n", name, byte_size);
+		snprintf(s, sizeof(s), "\t.comm\t%s,%d\n", name, byte_size);
 	textbuf_push(&unit_post_text, s);
 }
 
@@ -966,9 +966,14 @@ static void emit_initializer(struct symbol *sym,
 
 	if (expr->type == EXPR_VALUE) {
 		struct symbol *base_type = sym->ctype.base_type;
+		long long nr;
 		assert(base_type != NULL);
 
-		emit_scalar(expr, sym->bit_size / get_expression_value(base_type->array_size));
+		nr = get_expression_value(base_type->array_size);
+		if (nr > 0)
+			emit_scalar(expr, sym->bit_size / nr);
+		else if (base_type->ctype.base_type && base_type->ctype.base_type->bit_size > 0)
+			emit_scalar(expr, base_type->ctype.base_type->bit_size);
 		return;
 	}
 	if (expr->type != EXPR_INITIALIZER)
@@ -1129,7 +1134,7 @@ static void emit_array_noinit(struct symbol *sym)
 {
 	emit_global_noinit(show_ident(sym->ident),
 			   sym->ctype.modifiers, sym->ctype.alignment,
-			   get_expression_value(sym->array_size) * (sym->bit_size / 8));
+			   sym->bit_size / 8);
 	stor_sym_init(sym);
 }
 
@@ -1249,7 +1254,7 @@ static struct storage *emit_compare(struct expression *expr)
 	case SPECIAL_UNSIGNED_GT:
 				opname = "seta";	break;
 	case SPECIAL_UNSIGNED_LTE:
-				opname = "setb";	break;
+				opname = "setbe";	break;
 	case SPECIAL_UNSIGNED_GTE:
 				opname = "setae";	break;
 	default:
@@ -1820,13 +1825,16 @@ static void x86_symbol(struct symbol *sym)
 		break;
 
 	case SYM_BASETYPE:
+	case SYM_PTR:
 		if (sym->initializer) {
-			emit_object_pre(show_ident(sym->ident),
-					sym->ctype.modifiers,
-				        sym->ctype.alignment,
-					sym->bit_size / 8);
-			emit_scalar(sym->initializer, sym->bit_size);
-			stor_sym_init(sym);
+			if (sym->initializer->type == EXPR_VALUE) {
+				emit_object_pre(show_ident(sym->ident),
+						sym->ctype.modifiers,
+					        sym->ctype.alignment,
+						sym->bit_size / 8);
+				emit_scalar(sym->initializer, sym->bit_size);
+				stor_sym_init(sym);
+			}
 		} else
 			emit_scalar_noinit(sym);
 		break;
@@ -1857,8 +1865,8 @@ static void x86_symbol(struct symbol *sym)
 		break;
 	}
 
-	if (sym->initializer && (type->type != SYM_BASETYPE) &&
-	    (type->type != SYM_ARRAY)) {
+	if (current_func && sym->initializer && (type->type != SYM_BASETYPE) &&
+	    (type->type != SYM_ARRAY) && (type->type != SYM_PTR)) {
 		printf(" = \n");
 		x86_expression(sym->initializer);
 	}
@@ -2039,12 +2047,14 @@ static struct storage *x86_statement(struct statement *stmt)
 		if (stmt->goto_expression) {
 			struct storage *val = x86_expression(stmt->goto_expression);
 			printf("\tgoto *v%d\n", val->pseudo);
-		} else if (!strcmp("break", show_ident(stmt->goto_label->ident))) {
+		} else if (stmt->goto_label && stmt->goto_label->ident &&
+			   !strcmp("break", show_ident(stmt->goto_label->ident))) {
 			struct storage *lbv = new_storage(STOR_LABEL);
 			lbv->label = loopstk_break();
 			lbv->flags = STOR_WANTS_FREE;
 			insn("jmp", lbv, NULL, "'break'; go to loop bottom");
-		} else if (!strcmp("continue", show_ident(stmt->goto_label->ident))) {
+		} else if (stmt->goto_label && stmt->goto_label->ident &&
+			   !strcmp("continue", show_ident(stmt->goto_label->ident))) {
 			struct storage *lbv = new_storage(STOR_LABEL);
 			lbv->label = loopstk_continue();
 			lbv->flags = STOR_WANTS_FREE;
