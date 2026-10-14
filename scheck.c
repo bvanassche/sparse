@@ -107,9 +107,8 @@ static BoolectorNode *sext(Btor *btor, struct instruction *insn, BoolectorNode *
 
 static BoolectorNode *slice(Btor *btor, struct instruction *insn, BoolectorNode *s)
 {
-	int old = boolector_get_width(btor, s);
 	int new = insn->type->bit_size;
-	return boolector_slice(btor, s, old - new - 1, 0);
+	return boolector_slice(btor, s, new - 1, 0);
 }
 
 static void binary(Btor *btor, BoolectorSort s, struct instruction *insn)
