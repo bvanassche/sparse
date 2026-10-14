@@ -135,28 +135,27 @@ static void graph_calls(struct entrypoint *ep, int internal)
 			if (!insn->bb)
 				continue;
 			if (insn->opcode == OP_CALL &&
+			    insn->func->type == PSEUDO_SYM &&
 			    internal == !(insn->func->sym->ctype.modifiers & MOD_EXTERN)) {
 
 				/* Find the symbol for the callee's definition */
 				struct symbol * sym;
-				if (insn->func->type == PSEUDO_SYM) {
-					for (sym = insn->func->sym->ident->symbols;
-					     sym; sym = sym->next_id) {
-						if (sym->namespace & NS_SYMBOL && sym->ep)
-							break;
-					}
-
-					if (sym)
-						printf("bb%p -> bb%p"
-						       "[label=%d,line=%d,col=%d,op=call,style=bold,weight=30];\n",
-						       bb, sym->ep->entry->bb,
-						       insn->pos.line, insn->pos.line, insn->pos.pos);
-					else
-						printf("bb%p -> \"%s\" "
-						       "[label=%d,line=%d,col=%d,op=extern,style=dashed];\n",
-						       bb, show_pseudo(insn->func),
-						       insn->pos.line, insn->pos.line, insn->pos.pos);
+				for (sym = insn->func->sym->ident->symbols;
+				     sym; sym = sym->next_id) {
+					if (sym->namespace & NS_SYMBOL && sym->ep)
+						break;
 				}
+
+				if (sym)
+					printf("bb%p -> bb%p"
+					       "[label=%d,line=%d,col=%d,op=call,style=bold,weight=30];\n",
+					       bb, sym->ep->entry->bb,
+					       insn->pos.line, insn->pos.line, insn->pos.pos);
+				else
+					printf("bb%p -> \"%s\" "
+					       "[label=%d,line=%d,col=%d,op=extern,style=dashed];\n",
+					       bb, show_pseudo(insn->func),
+					       insn->pos.line, insn->pos.line, insn->pos.pos);
 			}
 		} END_FOR_EACH_PTR(insn);
 	} END_FOR_EACH_PTR(bb);
