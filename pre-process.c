@@ -35,6 +35,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <time.h>
+#include <sys/stat.h>
 
 #include "lib.h"
 #include "allocate.h"
@@ -107,8 +108,12 @@ static int expand(struct token **, struct symbol *);
 
 static void replace_with_string(struct token *token, const char *str)
 {
-	int size = strlen(str) + 1;
-	struct string *s = __alloc_string(size);
+	size_t size = strlen(str) + 1;
+	struct string *s;
+
+	if (size > INT_MAX - sizeof(struct string))
+		die("string too large");
+	s = __alloc_string(size);
 
 	s->length = size;
 	memcpy(s->data, str, size);
@@ -312,6 +317,13 @@ struct arg {
 	int n_str;
 };
 
+static inline bool stream_end_token(const struct token *t)
+{
+	return eof_token(t) ||
+	       token_type(t) == TOKEN_STREAMEND ||
+	       token_type(t) == TOKEN_STREAMBEGIN;
+}
+
 static int collect_arguments(struct token *start, struct token *arglist, struct arg *args, struct token *what)
 {
 	int wanted = arglist->count.normal;
@@ -322,7 +334,7 @@ static int collect_arguments(struct token *start, struct token *arglist, struct 
 
 	if (!wanted) {
 		next = collect_arg(start, 0, &what->pos);
-		if (eof_token(next))
+		if (stream_end_token(next))
 			goto Eclosing;
 		if (!eof_token(start->next) || !match_op(next, ')')) {
 			count++;
@@ -332,7 +344,7 @@ static int collect_arguments(struct token *start, struct token *arglist, struct 
 		for (count = 0; count < wanted; count++) {
 			struct argcount *p = &arglist->next->count;
 			next = collect_arg(start, p->vararg, &what->pos);
-			if (eof_token(next))
+			if (stream_end_token(next))
 				goto Eclosing;
 			if (p->vararg && wanted == 1 && eof_token(start->next))
 				break;
@@ -373,7 +385,7 @@ Emany:
 		next = collect_arg(next, 0, &what->pos);
 		count++;
 	}
-	if (eof_token(next))
+	if (stream_end_token(next))
 		goto Eclosing;
 	sparse_error(what->pos, "macro \"%s\" passed %d arguments, but takes just %d",
 		show_token(what), count, wanted);
@@ -382,7 +394,10 @@ Eclosing:
 	sparse_error(what->pos, "unterminated argument list invoking macro \"%s\"",
 		show_token(what));
 out:
-	what->next = next->next;
+	if (stream_end_token(next))
+		what->next = next;
+	else
+		what->next = next->next;
 	return 0;
 }
 
@@ -499,12 +514,22 @@ static enum token_type combine(struct token *left, struct token *right, char *p)
 	if (t2 != TOKEN_IDENT && t2 != TOKEN_NUMBER && t2 != TOKEN_SPECIAL)
 		return TOKEN_ERROR;
 
-	strcpy(p, show_token(left));
-	strcat(p, show_token(right));
-	len = strlen(p);
+	{
+		const char *s1 = show_token(left);
+		int l1 = strlen(s1);
+		const char *s2;
+		int l2;
 
-	if (len >= 256)
-		return TOKEN_ERROR;
+		if (l1 > 4096)
+			return TOKEN_ERROR;
+		memcpy(p, s1, l1);
+		s2 = show_token(right);
+		l2 = strlen(s2);
+		if (l1 + l2 > 4096)
+			return TOKEN_ERROR;
+		memcpy(p + l1, s2, l2 + 1);
+		len = l1 + l2;
+	}
 
 	if (t1 == TOKEN_IDENT) {
 		if (t2 == TOKEN_SPECIAL)
@@ -537,7 +562,7 @@ static enum token_type combine(struct token *left, struct token *right, char *p)
 
 static int merge(struct token *left, struct token *right)
 {
-	static char buffer[512];
+	static char buffer[4097];
 	enum token_type res = combine(left, right, buffer);
 	int n;
 
@@ -782,17 +807,22 @@ static int expand(struct token **list, struct symbol *sym)
 
 static const char *token_name_sequence(struct token *token, int endop, struct token *start)
 {
-	static char buffer[256];
+	static char buffer[PATH_MAX];
 	char *ptr = buffer;
 
 	while (!eof_token(token) && !match_op(token, endop)) {
-		int len;
+		size_t len, rem;
 		const char *val;
 		if (token_type(token) == TOKEN_STRING)
 			val = token->string->data;
 		else
 			val = show_token(token);
 		len = strlen(val);
+		rem = sizeof(buffer) - (size_t)(ptr - buffer);
+		if (len >= rem) {
+			sparse_error(token->pos, "header name too long");
+			return NULL;
+		}
 		memcpy(ptr, val, len);
 		ptr += len;
 		token = token->next;
@@ -896,23 +926,30 @@ static void set_stream_include_path(struct stream *stream)
 static int try_include(struct position pos, const char *path, const char *filename, int flen, struct token **where, const char **next_path)
 {
 	int fd;
+	struct stat st;
 	int plen = strlen(path);
-	static char fullname[PATH_MAX];
+	char fullname[PATH_MAX];
 
+	if (!flen || plen + flen + 2 > sizeof(fullname))
+		return 0;
 	memcpy(fullname, path, plen);
 	if (plen && path[plen-1] != '/') {
 		fullname[plen] = '/';
 		plen++;
 	}
 	memcpy(fullname+plen, filename, flen);
+	fullname[plen + flen] = '\0';
 	if (already_tokenized(fullname))
 		return 1;
 	fd = open(fullname, O_RDONLY);
 	if (fd >= 0) {
-		char *streamname = xmemdup(fullname, plen + flen);
-		*where = tokenize(&pos, streamname, fd, *where, next_path);
+		if (fstat(fd, &st) == 0 && !S_ISDIR(st.st_mode)) {
+			char *streamname = xmemdup(fullname, plen + flen + 1);
+			*where = tokenize(&pos, streamname, fd, *where, next_path);
+			close(fd);
+			return 1;
+		}
 		close(fd);
-		return 1;
 	}
 	return 0;
 }
@@ -961,6 +998,8 @@ static int handle_include_path(struct stream *stream, struct token **list, struc
 
 	token = next->next;
 	filename = token_name_sequence(token, expect, token);
+	if (!filename)
+		return 1;
 	flen = strlen(filename) + 1;
 
 	/* Absolute path? */
@@ -1647,6 +1686,14 @@ static int expression_value(struct token **where)
 			continue;
 		}
 		list = &p->next;
+	}
+
+	if (state == 1 || state == 2) {
+		sparse_error((*beginning)->pos, "expected identifier after \"defined\"");
+		replace_with_bool(*beginning, 0);
+		(*beginning)->next = &eof_token_entry;
+	} else if (state == 3) {
+		sparse_error((*beginning)->pos, "missing ')' after \"defined\"");
 	}
 
 	p = constant_expression(*where, &expr);
