@@ -592,7 +592,7 @@ static struct symbol *examine_enum_type(struct symbol *sym)
 	struct symbol *base_type = examine_base_type(sym);
 
 	sym->ctype.modifiers |= (base_type->ctype.modifiers & MOD_SIGNEDNESS);
-	if (sym->fixed_type) {
+	if (sym->fixed_type || sym->has_mode) {
 		if (base_type == &bool_ctype)
 			sym->bit_size = bits_to_bytes(bits_in_bool) * bits_in_char;
 		else

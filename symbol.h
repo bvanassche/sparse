@@ -214,6 +214,7 @@ struct symbol {
 			unsigned int kr_args : 1;
 			unsigned int underspecified : 1;
 			unsigned int c23_auto : 1;
+			unsigned int has_mode : 1;
 			int		rank:3;	// arithmetic's rank
 			struct expression *array_size;
 			struct ctype ctype;
