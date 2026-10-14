@@ -352,6 +352,7 @@ static struct symbol * examine_array_type(struct symbol *sym)
 	struct symbol *base_type = examine_base_type(sym);
 	unsigned long bit_size = -1, alignment;
 	struct expression *array_size = sym->array_size;
+	int elem_size;
 
 	if (!base_type)
 		return sym;
@@ -376,8 +377,13 @@ static struct symbol * examine_array_type(struct symbol *sym)
 	if (has_flexible_array(base_type) && Wflexible_array_array)
 		warning(sym->pos, "array of flexible structures");
 	alignment = base_type->ctype.alignment;
-	if (!sym->ctype.alignment)
+	if (!sym->ctype.alignment || sym->ctype.alignment < alignment)
 		sym->ctype.alignment = alignment;
+	elem_size = bits_to_bytes(base_type->bit_size);
+	if (elem_size > 0 && sym->ctype.alignment &&
+	    (elem_size % sym->ctype.alignment))
+		sparse_error(sym->pos,
+			     "size of array element is not a multiple of its alignment");
 	sym->bit_size = bit_size;
 	return sym;
 }
@@ -587,25 +593,92 @@ static struct symbol * examine_node_type(struct symbol *sym)
 	return sym;
 }
 
+static unsigned long long rshift(unsigned long long val, unsigned int n)
+{
+	if (n >= (sizeof(val) * 8))
+		return 0;
+	return val >> n;
+}
+
+static int type_is_ok(struct symbol *type, struct range range)
+{
+	int shift = type->bit_size;
+	int is_unsigned = type->ctype.modifiers & MOD_UNSIGNED;
+
+	if (!is_unsigned)
+		shift--;
+	if (rshift(range.pos, shift))
+		return 0;
+	if (range.neg == 0)
+		return 1;
+	if (is_unsigned)
+		return 0;
+	if (rshift(~range.neg, shift))
+		return 0;
+	return 1;
+}
+
+struct symbol *get_enum_base_type(struct range range, int packed)
+{
+	if (packed) {
+		if (type_is_ok(&uchar_ctype, range))
+			return &uchar_ctype;
+		if (type_is_ok(&schar_ctype, range))
+			return &schar_ctype;
+		if (type_is_ok(&ushort_ctype, range))
+			return &ushort_ctype;
+		if (type_is_ok(&short_ctype, range))
+			return &short_ctype;
+	}
+	if (type_is_ok(&uint_ctype, range))
+		return &uint_ctype;
+	if (type_is_ok(&int_ctype, range))
+		return &int_ctype;
+	if (type_is_ok(&ulong_ctype, range))
+		return &ulong_ctype;
+	if (type_is_ok(&long_ctype, range))
+		return &long_ctype;
+	if (type_is_ok(&ullong_ctype, range))
+		return &ullong_ctype;
+	if (type_is_ok(&llong_ctype, range))
+		return &llong_ctype;
+	return &bad_ctype;
+}
+
 static struct symbol *examine_enum_type(struct symbol *sym)
 {
-	struct symbol *base_type = examine_base_type(sym);
+	struct symbol *base_type;
+	unsigned long alignment;
+
+	if (sym->packed && !sym->fixed_type && !sym->has_mode &&
+	    sym->ctype.base_type && is_int_type(sym->ctype.base_type) &&
+	    sym->ctype.base_type != &incomplete_ctype) {
+		base_type = get_enum_base_type(sym->range, 1);
+		if (base_type && base_type != &bad_ctype) {
+			sym->ctype.base_type = base_type;
+			sym->ctype.modifiers &= ~MOD_SIGNEDNESS;
+			sym->ctype.modifiers |= (base_type->ctype.modifiers & MOD_SIGNEDNESS);
+		}
+	}
+	base_type = examine_base_type(sym);
 
 	sym->ctype.modifiers |= (base_type->ctype.modifiers & MOD_SIGNEDNESS);
-	if (sym->fixed_type || sym->has_mode) {
+	if (sym->fixed_type || sym->packed || sym->has_mode) {
 		if (base_type == &bool_ctype)
 			sym->bit_size = bits_to_bytes(bits_in_bool) * bits_in_char;
 		else
 			sym->bit_size = base_type->bit_size;
-		sym->ctype.alignment = base_type->ctype.alignment;
+		alignment = base_type->ctype.alignment;
 	} else {
 		sym->bit_size = bits_in_enum;
 		if (base_type->bit_size > sym->bit_size)
 			sym->bit_size = base_type->bit_size;
-		sym->ctype.alignment = enum_alignment;
-		if (base_type->ctype.alignment > sym->ctype.alignment)
-			sym->ctype.alignment = base_type->ctype.alignment;
+		alignment = enum_alignment;
+		if (base_type->ctype.alignment > alignment)
+			alignment = base_type->ctype.alignment;
 	}
+	if (sym->ctype.alignment < alignment)
+		sym->ctype.alignment = alignment;
 	sym->rank = base_type->rank;
 	return sym;
 }

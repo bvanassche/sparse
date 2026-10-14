@@ -87,6 +87,11 @@ enum keyword {
 	KW_EXACT	= 1 << 9,
 };
 
+struct range {
+	long long		neg;
+	unsigned long long	pos;
+};
+
 struct context {
 	struct expression *context;
 	unsigned int in, out;
@@ -112,10 +117,12 @@ struct decl_state {
 	unsigned long f_modifiers;		// function attributes
 	unsigned long ident_modifiers;		// declarator-id C23 attributes
 	unsigned long storage_class;
+	unsigned int typedef_alignment;
 	unsigned char prefer_abstract;
 	unsigned char autotype;
 	unsigned char forced;
 	unsigned char packed;
+	unsigned char has_aligned;
 	unsigned char has_auto;
 	unsigned char has_alignas;
 	unsigned char is_constexpr;
@@ -215,6 +222,7 @@ struct symbol {
 			unsigned int underspecified : 1;
 			unsigned int c23_auto : 1;
 			unsigned int has_mode : 1;
+			unsigned int has_aligned : 1;
 			int		rank:3;	// arithmetic's rank
 			struct expression *array_size;
 			struct ctype ctype;
@@ -225,6 +233,7 @@ struct symbol {
 			struct symbol_list *inline_symbol_list;
 			struct expression *initializer;
 			struct expression *cleanup;
+			struct range range;
 			struct entrypoint *ep;
 			struct symbol *definition;
 		};
@@ -373,6 +382,7 @@ extern void bind_symbol_with_scope(struct symbol *, struct ident *, enum namespa
 extern struct symbol *strip_array_qualifiers(struct symbol *);
 extern struct symbol *examine_symbol_type(struct symbol *);
 extern struct symbol *examine_pointer_target(struct symbol *);
+extern struct symbol *get_enum_base_type(struct range range, int packed);
 extern const char *show_as(struct ident *as);
 extern const char *show_typename(struct symbol *sym);
 extern const char *builtin_typename(struct symbol *sym);
