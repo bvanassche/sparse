@@ -1011,7 +1011,7 @@ static struct expression *constant_symbol_value(struct symbol *sym, int offset)
 
 	if (offset < 0 || sym->expanding)
 		return NULL;
-	if (sym->ctype.modifiers & MOD_VOLATILE)
+	if (sym->ctype.modifiers & (MOD_VOLATILE | MOD_WEAK))
 		return NULL;
 	if ((sym->ctype.modifiers & MOD_ACCESS) &&
 	    !(sym->ctype.modifiers & MOD_CONSTEXPR))
@@ -1330,7 +1330,7 @@ static int expand_symbol_call(struct expression *expr, int cost)
 	if (ctype->op && ctype->op->expand)
 		return ctype->op->expand(expr, cost);
 
-	if (ctype->ctype.modifiers & MOD_PURE)
+	if (ctype->ctype.modifiers & (MOD_PURE | MOD_FCONST))
 		return cost + 1;
 
 	return SIDE_EFFECTS;
@@ -1502,6 +1502,120 @@ static void verify_nonoverlapping(struct expression_list **list, struct expressi
 	} END_FOR_EACH_PTR(b);
 }
 
+static const char *normalize_attr_name(const char *name)
+{
+	static char buf[64];
+	size_t len;
+	if (!name)
+		return "";
+	len = strlen(name);
+	if (len >= 4 && name[0] == '_' && name[1] == '_' &&
+	    name[len-1] == '_' && name[len-2] == '_') {
+		if (len - 4 < sizeof(buf)) {
+			memcpy(buf, name + 2, len - 4);
+			buf[len - 4] = '\0';
+			return buf;
+		}
+	}
+	return name;
+}
+
+static bool is_fun_attr_name(const char *name)
+{
+	return !strcmp(name, "pure") || !strcmp(name, "reproducible") ||
+	       !strcmp(name, "const") || !strcmp(name, "unsequenced") ||
+	       !strcmp(name, "noreturn") || !strcmp(name, "_Noreturn") ||
+	       !strcmp(name, "gnu_inline");
+}
+
+static bool check_symbol_has_attr(struct symbol *sym, const char *name, bool is_decl)
+{
+	if (!sym || !name)
+		return false;
+
+	if (!strcmp(name, "packed"))
+		return sym->packed != 0;
+	if (!strcmp(name, "aligned"))
+		return (sym->ctype.modifiers & MOD_ALIGNED) != 0;
+	if (!strcmp(name, "weak"))
+		return (sym->ctype.modifiers & MOD_WEAK) != 0;
+	if (!strcmp(name, "pure") || !strcmp(name, "reproducible"))
+		return (sym->ctype.modifiers & MOD_PURE) != 0;
+	if (!strcmp(name, "unsequenced"))
+		return (sym->ctype.modifiers & MOD_FCONST) != 0;
+	if (!strcmp(name, "const")) {
+		if (sym->ctype.modifiers & MOD_FCONST)
+			return true;
+		return is_decl && (sym->ctype.modifiers & MOD_CONST) != 0;
+	}
+	if (!strcmp(name, "noreturn") || !strcmp(name, "_Noreturn"))
+		return (sym->ctype.modifiers & MOD_NORETURN) != 0;
+	if (!strcmp(name, "noderef"))
+		return (sym->ctype.modifiers & MOD_NODEREF) != 0;
+	if (!strcmp(name, "unused") || !strcmp(name, "maybe_unused"))
+		return (sym->ctype.modifiers & MOD_UNUSED) != 0;
+	if (!strcmp(name, "externally_visible"))
+		return (sym->ctype.modifiers & MOD_EXT_VISIBLE) != 0;
+	if (!strcmp(name, "gnu_inline"))
+		return (sym->ctype.modifiers & MOD_GNU_INLINE) != 0;
+	if (!strcmp(name, "address_space"))
+		return sym->ctype.as != NULL;
+	if (!strcmp(name, "bitwise"))
+		return (sym->ctype.modifiers & MOD_BITWISE) != 0 ||
+		       sym->type == SYM_RESTRICT;
+	if (!strcmp(name, "nocast"))
+		return (sym->ctype.modifiers & MOD_NOCAST) != 0;
+	if (!strcmp(name, "transparent_union"))
+		return sym->transparent_union != 0;
+	if (!strcmp(name, "designated_init"))
+		return sym->designated_init != 0;
+	if (!strcmp(name, "nonstring"))
+		return (sym->ctype.modifiers & MOD_NONSTRING) != 0;
+
+	return false;
+}
+
+static int expand_has_attribute(struct expression *expr)
+{
+	struct symbol *sym = expr->has_attr_sym;
+	struct expression *sub = expr->has_attr_expr;
+	struct ident *attr_id = expr->has_attr_ident;
+	const char *attr_name = attr_id ? normalize_attr_name(show_ident(attr_id)) : "";
+	bool has_attr = false;
+
+	if (!sym && sub) {
+		if (sub->type == EXPR_PREOP && sub->op == '*' &&
+		    sub->unop && sub->unop->type == EXPR_SYMBOL)
+			sym = sub->unop->symbol;
+		else if (sub->type == EXPR_SYMBOL)
+			sym = sub->symbol;
+		else if (sub->ctype)
+			sym = sub->ctype;
+	}
+
+	if (sym) {
+		bool is_decl = expr->has_attr_decl;
+		if (sym->type == SYM_NODE && sym->ctype.base_type) {
+			struct symbol *base = sym->ctype.base_type;
+			if (check_symbol_has_attr(sym, attr_name, is_decl))
+				has_attr = true;
+			else if (base->type != SYM_PTR)
+				has_attr = check_symbol_has_attr(base, attr_name, false);
+			else if (base->ctype.base_type &&
+				 base->ctype.base_type->type == SYM_FN &&
+				 is_fun_attr_name(attr_name))
+				has_attr = check_symbol_has_attr(base, attr_name, false);
+		} else {
+			has_attr = check_symbol_has_attr(sym, attr_name, is_decl);
+		}
+	}
+
+	expr->type = EXPR_VALUE;
+	expr->value = has_attr ? 1 : 0;
+	expr->taint = 0;
+	return 0;
+}
+
 static int expand_expression(struct expression *expr)
 {
 	if (!expr)
@@ -1576,6 +1690,9 @@ static int expand_expression(struct expression *expr)
 
 	case EXPR_INDEX:
 		return UNSAFE;
+
+	case EXPR_HAS_ATTRIBUTE:
+		return expand_has_attribute(expr);
 
 	case EXPR_SLICE:
 		return expand_expression(expr->base) + 1;

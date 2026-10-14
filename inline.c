@@ -363,6 +363,12 @@ static struct expression * copy_expression(struct expression *expr)
 		break;
 	}
 
+	case EXPR_HAS_ATTRIBUTE:
+		expr = dup_expression(expr);
+		if (expr->has_attr_expr)
+			expr->has_attr_expr = copy_expression(expr->has_attr_expr);
+		break;
+
 	default:
 		warning(expr->pos, "trying to copy expression type %d", expr->type);
 	}

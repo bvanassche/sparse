@@ -900,6 +900,7 @@ static const struct builtin_fn builtins_common[] = {
 	{ "__builtin_fmal", &ldouble_ctype, 0, { &ldouble_ctype, &ldouble_ctype, &ldouble_ctype }},
 	{ "__builtin_frame_address", &ptr_ctype, 0, { &uint_ctype }},
 	{ "__builtin_free", &void_ctype, 0, { &ptr_ctype }},
+	{ "__builtin_has_attribute", &int_ctype, 1 },
 	{ "__builtin_huge_val", &double_ctype, 0 },
 	{ "__builtin_huge_valf", &float_ctype, 0 },
 	{ "__builtin_huge_vall", &ldouble_ctype, 0 },

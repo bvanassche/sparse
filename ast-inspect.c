@@ -180,6 +180,7 @@ static const char *expression_type_name(enum expression_type type)
 		[EXPR_FVALUE] = "EXPR_FVALUE",
 		[EXPR_SLICE] = "EXPR_SLICE",
 		[EXPR_OFFSETOF] = "EXPR_OFFSETOF",
+		[EXPR_HAS_ATTRIBUTE] = "EXPR_HAS_ATTRIBUTE",
 	};
 	return expression_type_name[type] ?: "UNKNOWN_EXPRESSION_TYPE";
 }

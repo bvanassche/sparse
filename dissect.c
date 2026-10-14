@@ -483,6 +483,10 @@ again:
 			ret = do_expression(mode, expr->def);
 	}
 
+	break; case EXPR_HAS_ATTRIBUTE:
+		if (expr->has_attr_expr)
+			do_expression(mode, expr->has_attr_expr);
+
 	break; case EXPR_SYMBOL:
 		ret = report_symbol(mode, expr);
 	}

@@ -185,6 +185,83 @@ static struct token *builtin_types_compatible_p_expr(struct token *token,
 	return token;
 }
 
+static struct token *builtin_has_attribute_expr(struct token *token,
+						struct expression **tree)
+{
+	struct expression *expr = alloc_expression(token->pos, EXPR_HAS_ATTRIBUTE);
+	struct symbol *type_sym = NULL;
+	struct expression *val_expr = NULL;
+	struct ident *attr_ident = NULL;
+
+	token = token->next;
+	if (!match_op(token, '('))
+		return expect(token, '(', "after __builtin_has_attribute");
+	token = token->next;
+
+	if (lookup_type(token)) {
+		token = typename(token, &type_sym, NULL);
+		check_typename_storage(type_sym);
+	} else {
+		token = assignment_expression(token, &val_expr);
+	}
+
+	if (!match_op(token, ','))
+		return expect(token, ',', "in __builtin_has_attribute");
+	token = token->next;
+
+	if (token_type(token) == TOKEN_IDENT &&
+	    (token->ident == &__attribute_ident ||
+	     token->ident == &__attribute___ident)) {
+		token = token->next;
+		if (match_op(token, '(')) {
+			int depth = 1;
+			token = token->next;
+			while (depth && !eof_token(token)) {
+				if (token_type(token) == TOKEN_IDENT && !attr_ident)
+					attr_ident = token->ident;
+				if (token_type(token) == TOKEN_SPECIAL) {
+					if (token->special == '(')
+						depth++;
+					else if (token->special == ')')
+						depth--;
+				}
+				token = token->next;
+			}
+		}
+		if (!attr_ident)
+			sparse_error(token->pos, "expected attribute name");
+	} else if (token_type(token) == TOKEN_IDENT) {
+		attr_ident = token->ident;
+		token = token->next;
+		if (match_op(token, '(')) {
+			int depth = 1;
+			token = token->next;
+			while (depth && !eof_token(token)) {
+				if (token_type(token) == TOKEN_SPECIAL) {
+					if (token->special == '(')
+						depth++;
+					else if (token->special == ')')
+						depth--;
+				}
+				token = token->next;
+			}
+		}
+	} else {
+		sparse_error(token->pos, "expected attribute name");
+		while (!eof_token(token) && !match_op(token, ')'))
+			token = token->next;
+	}
+
+	token = expect(token, ')', "at end of __builtin_has_attribute");
+
+	expr->has_attr_sym = type_sym;
+	expr->has_attr_expr = val_expr;
+	expr->has_attr_ident = attr_ident;
+	expr->flags = CEF_SET_ICE;
+	*tree = expr;
+	return token;
+}
+
 static struct token *builtin_offsetof_expr(struct token *token,
 					   struct expression **tree)
 {
@@ -762,6 +839,11 @@ struct token *primary_expression(struct token *token, struct expression **tree)
 			expr->ctype = &nullptr_ctype;
 			expr->value = 0;
 			token = next;
+			break;
+		}
+
+		if (token->ident == &__builtin_has_attribute_ident) {
+			token = builtin_has_attribute_expr(token, &expr);
 			break;
 		}
 
