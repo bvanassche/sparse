@@ -992,6 +992,20 @@ static struct token *struct_union_enum_specifier(enum type type,
 		else
 			warning(token->pos, "attribute __transparent_union__ applied to non-union type");
 	}
+	if (sym->type == SYM_ENUM && attr.mode && attr.mode->to_mode &&
+	    !sym->fixed_type && sym->ctype.base_type &&
+	    is_int_type(sym->ctype.base_type)) {
+		struct symbol *mtype = attr.mode->to_mode(sym);
+		if (mtype) {
+			sym->ctype.base_type = mtype;
+			sym->has_mode = 1;
+			sym->ctype.modifiers &= ~MOD_SIGNEDNESS;
+			sym->ctype.modifiers |= (mtype->ctype.modifiers & MOD_SIGNEDNESS);
+			sym->bit_size = mtype->bit_size;
+			sym->ctype.alignment = mtype->ctype.alignment;
+			sym->rank = mtype->rank;
+		}
+	}
 
 	sym->endpos = token->pos;
 
@@ -1599,62 +1613,86 @@ static struct token *attribute_address_space(struct token *token, struct symbol 
 	return token;
 }
 
+static inline bool is_int_or_enum(struct symbol *ctype)
+{
+	if (!ctype)
+		return false;
+	if (ctype->type == SYM_ENUM)
+		return true;
+	if (ctype->ctype.base_type == &int_type)
+		return true;
+	if (ctype->type == SYM_NODE && ctype->ctype.base_type &&
+	    (ctype->ctype.base_type->type == SYM_ENUM ||
+	     ctype->ctype.base_type->ctype.base_type == &int_type))
+		return true;
+	return false;
+}
+
+static inline bool is_unsigned_mode_type(struct symbol *ctype)
+{
+	if (!ctype)
+		return false;
+	if (ctype->type == SYM_NODE || ctype->type == SYM_ENUM)
+		examine_symbol_type(ctype);
+	while (ctype && (ctype->type == SYM_NODE || ctype->type == SYM_ENUM)) {
+		if (ctype->ctype.modifiers & MOD_UNSIGNED)
+			return true;
+		if (ctype->ctype.modifiers & MOD_SIGNED)
+			return false;
+		ctype = ctype->ctype.base_type;
+	}
+	return ctype && (ctype->ctype.modifiers & MOD_UNSIGNED);
+}
+
 static struct symbol *to_QI_mode(struct symbol *ctype)
 {
-	if (ctype->ctype.base_type != &int_type)
+	if (!is_int_or_enum(ctype))
 		return NULL;
-	if (ctype == &char_ctype)
-		return ctype;
-	return ctype->ctype.modifiers & MOD_UNSIGNED ? &uchar_ctype
-						     : &schar_ctype;
+	if (cbase_type(ctype) == &char_ctype)
+		return &char_ctype;
+	return is_unsigned_mode_type(ctype) ? &uchar_ctype : &schar_ctype;
 }
 
 static struct symbol *to_HI_mode(struct symbol *ctype)
 {
-	if (ctype->ctype.base_type != &int_type)
+	if (!is_int_or_enum(ctype))
 		return NULL;
-	return ctype->ctype.modifiers & MOD_UNSIGNED ? &ushort_ctype
-						     : &sshort_ctype;
+	return is_unsigned_mode_type(ctype) ? &ushort_ctype : &sshort_ctype;
 }
 
 static struct symbol *to_SI_mode(struct symbol *ctype)
 {
-	if (ctype->ctype.base_type != &int_type)
+	if (!is_int_or_enum(ctype))
 		return NULL;
-	return ctype->ctype.modifiers & MOD_UNSIGNED ? &uint_ctype
-						     : &sint_ctype;
+	return is_unsigned_mode_type(ctype) ? &uint_ctype : &sint_ctype;
 }
 
 static struct symbol *to_DI_mode(struct symbol *ctype)
 {
-	if (ctype->ctype.base_type != &int_type)
+	if (!is_int_or_enum(ctype))
 		return NULL;
-	return ctype->ctype.modifiers & MOD_UNSIGNED ? &ullong_ctype
-						     : &sllong_ctype;
+	return is_unsigned_mode_type(ctype) ? &ullong_ctype : &sllong_ctype;
 }
 
 static struct symbol *to_TI_mode(struct symbol *ctype)
 {
-	if (ctype->ctype.base_type != &int_type)
+	if (!is_int_or_enum(ctype))
 		return NULL;
-	return ctype->ctype.modifiers & MOD_UNSIGNED ? &uint128_ctype
-						     : &sint128_ctype;
+	return is_unsigned_mode_type(ctype) ? &uint128_ctype : &sint128_ctype;
 }
 
 static struct symbol *to_pointer_mode(struct symbol *ctype)
 {
-	if (ctype->ctype.base_type != &int_type)
+	if (!is_int_or_enum(ctype))
 		return NULL;
-	return ctype->ctype.modifiers & MOD_UNSIGNED ? uintptr_ctype
-						     :  intptr_ctype;
+	return is_unsigned_mode_type(ctype) ? uintptr_ctype : intptr_ctype;
 }
 
 static struct symbol *to_word_mode(struct symbol *ctype)
 {
-	if (ctype->ctype.base_type != &int_type)
+	if (!is_int_or_enum(ctype))
 		return NULL;
-	return ctype->ctype.modifiers & MOD_UNSIGNED ? &ulong_ctype
-						     : &slong_ctype;
+	return is_unsigned_mode_type(ctype) ? &ulong_ctype : &slong_ctype;
 }
 
 static struct token *attribute_mode(struct token *token, struct symbol *attr, struct decl_state *ctx)
