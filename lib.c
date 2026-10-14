@@ -182,6 +182,7 @@ void warning(struct position pos, const char * fmt, ...)
 {
 	va_list args;
 	static unsigned int warnings = 0;
+	const char *warn_fmt = fmt;
 
 	if (Wsparse_error) {
 		va_start(args, fmt);
@@ -200,12 +201,12 @@ void warning(struct position pos, const char * fmt, ...)
 		show_info = 0;
 		if (once)
 			return;
-		fmt = "too many warnings";
+		warn_fmt = "too many warnings";
 		once = 1;
 	}
 
 	va_start(args, fmt);
-	do_warn("warning: ", pos, fmt, args);
+	do_warn("warning: ", pos, warn_fmt, args);
 	va_end(args);
 }
 
