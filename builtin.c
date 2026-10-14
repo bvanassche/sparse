@@ -68,7 +68,7 @@ static int evaluate_pure_unop(struct expression *expr)
 static int eval_args(struct expression *expr, int n)
 {
 	struct expression *arg;
-	struct symbol *sym;
+	struct symbol *sym = expr->fn->ctype;
 	const char *msg;
 	int rc = 1;
 
@@ -87,7 +87,6 @@ static int eval_args(struct expression *expr, int n)
 	return rc;
 
 error:
-	sym = expr->fn->ctype;
 	expression_error(expr, "%s for %s", msg, show_ident(sym->ident));
 	return 0;
 }
@@ -454,47 +453,78 @@ struct symbol_op generic_int_op = {
 };
 
 
+static struct symbol *make_atomic_ptr_type(struct position pos,
+					   struct symbol *target,
+					   unsigned long mods,
+					   struct ident *as)
+{
+	struct symbol *ptr = alloc_symbol(pos, SYM_PTR);
+	ptr->ctype.base_type = target;
+	ptr->ctype.modifiers = mods;
+	ptr->ctype.as = as;
+	ptr->bit_size = bits_in_pointer;
+	ptr->ctype.alignment = pointer_alignment;
+	return ptr;
+}
+
 static int eval_atomic_common(struct expression *expr)
 {
 	struct symbol *fntype = expr->fn->ctype->ctype.base_type;
 	struct symbol_list *types = NULL;
 	struct symbol *ctype = NULL;
+	struct symbol *valtype = NULL;
+	struct symbol *aptr = NULL;
 	struct symbol *t;
 	struct expression *arg;
 	int n = 0;
 
 	// The number of arguments has already be verified.
-	// The first arg must be a pointer to an integral type.
+	// The first arg must be a pointer to an integral or pointer type.
 	PREPARE_PTR_LIST(fntype->arguments, t);
 	FOR_EACH_PTR(expr->args, arg) {
-		struct symbol *ptrtype = NULL;
-
 		if (++n == 1) {
-			t = arg->ctype;
-			if (!t)
+			struct symbol *proto_ptr = t ? t->ctype.base_type : NULL;
+			unsigned long proto_mods = MOD_VOLATILE;
+			if (proto_ptr && proto_ptr->ctype.base_type)
+				proto_mods = proto_ptr->ctype.base_type->ctype.modifiers;
+			aptr = arg->ctype;
+			if (!aptr)
 				return 0;
-			if (t->type == SYM_NODE)
-				t = t->ctype.base_type;
-			if (!t)
+			if (aptr->type == SYM_NODE)
+				aptr = aptr->ctype.base_type;
+			if (!aptr)
 				return 0;
-			if (t->type != SYM_PTR)
+			if (aptr->type != SYM_PTR)
 				goto err;
-			ptrtype = t;
-			t = t->ctype.base_type;
-			if (!t)
+			ctype = examine_pointer_target(aptr);
+			if (!ctype)
 				return 0;
-			if (t->type == SYM_NODE)
-				t = t->ctype.base_type;
-			if (!t)
-				return 0;
-			if (t->type != SYM_PTR && t->ctype.base_type != &int_type)
+			if (ctype->type != SYM_PTR && ctype->ctype.base_type != &int_type &&
+			    !is_int_type(ctype) && !is_restricted_type(ctype))
 				goto err;
-			ctype = t;
-			t = ptrtype;
+			valtype = ctype;
+			if (aptr->ctype.modifiers & MOD_NOCAST) {
+				struct symbol *node = alloc_symbol(arg->pos, SYM_NODE);
+				*node = *ctype;
+				node->type = SYM_NODE;
+				node->ctype.base_type = ctype;
+				node->ctype.modifiers |= MOD_NOCAST;
+				valtype = node;
+			}
+			t = make_atomic_ptr_type(
+				arg->pos, ctype,
+				proto_mods | (aptr->ctype.modifiers & (MOD_ATOMIC | MOD_NOCAST | MOD_NODEREF)),
+				aptr->ctype.as);
+		} else if (!t) {
+			break;
 		} else if (is_dynamic_type(t)) {
-			t = ctype;
-		} else if (t == &ptr_ctype) {
-			t = ptrtype;
+			t = valtype;
+		} else if (t == &ptr_ctype || t->ctype.base_type == &ptr_ctype) {
+			t = make_atomic_ptr_type(arg->pos, ctype,
+						 aptr->ctype.modifiers & MOD_NOCAST, NULL);
+		} else if (t == &const_ptr_ctype || t->ctype.base_type == &const_ptr_ctype) {
+			t = make_atomic_ptr_type(arg->pos, ctype,
+						 MOD_CONST | (aptr->ctype.modifiers & MOD_NOCAST), NULL);
 		}
 		add_ptr_list(&types, t);
 		NEXT_PTR_LIST(t);
@@ -502,7 +532,7 @@ static int eval_atomic_common(struct expression *expr)
 	FINISH_PTR_LIST(t);
 
 	if (!expr->ctype)	// set the return type, if needed
-		expr->ctype = ctype;
+		expr->ctype = valtype;
 	return evaluate_arguments(types, expr->args);
 
 err:
@@ -528,8 +558,13 @@ static int expand_object_size(struct expression *expr, int cost)
 	struct expression *arg = first_expression(expr->args);
 	int type = get_expression_value_silent(ptr_list_nth(expr->args, 1));
 	unsigned long val = -1, off = 0;
+	int hops = 0;
 
 	while (arg) {
+		if (++hops > 64) {
+			val = -1;
+			break;
+		}
 		switch (arg->type) {
 		case EXPR_IMPLIED_CAST:
 		case EXPR_CAST:
@@ -544,15 +579,20 @@ static int expand_object_size(struct expression *expr, int cost)
 			arg = arg->left;
 			continue;
 		case EXPR_PREOP:
+			if (arg->op == '(') {
+				arg = arg->unop;
+				continue;
+			}
 			// a deref is just intermediate variable
 			// and so the offset needs to be zeroed.
 			if (arg->op == '*') {
 				struct expression *parent = arg;
 				arg = arg->unop;
-				off = 0;
+				if (!arg)
+					break;
 				switch (arg->type) {
 				case EXPR_SYMBOL:
-					arg = arg->symbol->initializer;
+					arg = arg->symbol ? arg->symbol->initializer : NULL;
 					if (arg == parent) {
 						// stop at self-initialized vars
 						// and do not expand them.
@@ -562,6 +602,7 @@ static int expand_object_size(struct expression *expr, int cost)
 					}
 					continue;
 				default:
+					off = 0;
 					break;
 				}
 			}
@@ -584,7 +625,7 @@ static int expand_object_size(struct expression *expr, int cost)
 	else if (type & 1)
 		return UNSAFE;
 	else
-		val -= off;
+		val = (off > val) ? 0 : val - off;
 
 	expr->flags |= CEF_SET_ICE;
 	expr->type = EXPR_VALUE;
@@ -678,13 +719,14 @@ static const struct builtin_fn builtins_common[] = {
 #define size_t_ctype	&size_t_alias
 #define va_list_ctype	&ptr_ctype
 #define vol_ptr		&volatile_ptr_ctype
+#define cv_ptr		&const_volatile_ptr_ctype
 	{ "__atomic_add_fetch", NULL, 0, { vol_ptr, &dyntype, &int_ctype }, .op = &atomic_op },
-	{ "__atomic_always_lock_free", &bool_ctype, 0, { size_t_ctype, vol_ptr }},
+	{ "__atomic_always_lock_free", &bool_ctype, 0, { size_t_ctype, cv_ptr }},
 	{ "__atomic_and_fetch", NULL, 0, { vol_ptr, &dyntype, &int_ctype }, .op = &atomic_op },
 	{ "__atomic_clear", &void_ctype, 0, { &volatile_bool_ptr_ctype, &int_ctype }},
-	{ "__atomic_compare_exchange", &bool_ctype, 0, { vol_ptr, &ptr_ctype, &ptr_ctype, &bool_ctype, &int_ctype, &int_ctype }, .op = &atomic_op },
+	{ "__atomic_compare_exchange", &bool_ctype, 0, { vol_ptr, &ptr_ctype, &const_ptr_ctype, &bool_ctype, &int_ctype, &int_ctype }, .op = &atomic_op },
 	{ "__atomic_compare_exchange_n", &bool_ctype, 0, { vol_ptr, &ptr_ctype, &dyntype, &bool_ctype, &int_ctype, &int_ctype }, .op = &atomic_op },
-	{ "__atomic_exchange", &void_ctype, 0, { vol_ptr, &ptr_ctype, &ptr_ctype, &int_ctype }, .op = &atomic_op },
+	{ "__atomic_exchange", &void_ctype, 0, { vol_ptr, &const_ptr_ctype, &ptr_ctype, &int_ctype }, .op = &atomic_op },
 	{ "__atomic_exchange_n", NULL, 0, { vol_ptr, &dyntype, &int_ctype }, .op = &atomic_op },
 	{ "__atomic_fetch_add", NULL, 0, { vol_ptr, &dyntype, &int_ctype }, .op = &atomic_op },
 	{ "__atomic_fetch_and", NULL, 0, { vol_ptr, &dyntype, &int_ctype }, .op = &atomic_op },
@@ -692,13 +734,13 @@ static const struct builtin_fn builtins_common[] = {
 	{ "__atomic_fetch_or",  NULL, 0, { vol_ptr, &dyntype, &int_ctype }, .op = &atomic_op },
 	{ "__atomic_fetch_sub", NULL, 0, { vol_ptr, &dyntype, &int_ctype }, .op = &atomic_op },
 	{ "__atomic_fetch_xor", NULL, 0, { vol_ptr, &dyntype, &int_ctype }, .op = &atomic_op },
-	{ "__atomic_is_lock_free", &bool_ctype, 0, { size_t_ctype, vol_ptr }},
-	{ "__atomic_load", &void_ctype, 0, { vol_ptr, &ptr_ctype, &int_ctype }, .op = &atomic_op },
-	{ "__atomic_load_n", NULL, 0, { vol_ptr, &int_ctype }, .op = &atomic_op },
+	{ "__atomic_is_lock_free", &bool_ctype, 0, { size_t_ctype, cv_ptr }},
+	{ "__atomic_load", &void_ctype, 0, { cv_ptr, &ptr_ctype, &int_ctype }, .op = &atomic_op },
+	{ "__atomic_load_n", NULL, 0, { cv_ptr, &int_ctype }, .op = &atomic_op },
 	{ "__atomic_nand_fetch",NULL, 0, { vol_ptr, &dyntype, &int_ctype }, .op = &atomic_op },
 	{ "__atomic_or_fetch",  NULL, 0, { vol_ptr, &dyntype, &int_ctype }, .op = &atomic_op },
 	{ "__atomic_signal_fence", &void_ctype, 0, { &int_ctype }},
-	{ "__atomic_store", &void_ctype, 0, { vol_ptr, &ptr_ctype, &int_ctype }, .op = &atomic_op },
+	{ "__atomic_store", &void_ctype, 0, { vol_ptr, &const_ptr_ctype, &int_ctype }, .op = &atomic_op },
 	{ "__atomic_store_n", &void_ctype, 0, { vol_ptr, &dyntype, &int_ctype }, .op = &atomic_op },
 	{ "__atomic_sub_fetch", NULL, 0, { vol_ptr, &dyntype, &int_ctype }, .op = &atomic_op },
 	{ "__atomic_test_and_set", &bool_ctype, 0, { vol_ptr, &int_ctype }},
