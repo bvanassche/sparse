@@ -97,6 +97,11 @@ void cast_value(struct expression *expr, struct symbol *newtype, struct expressi
 	if (is_float_type(newtype) || is_float_type(oldtype))
 		goto Float;
 
+	if (!is_bool_type(newtype) && new_size > 64 && old_size >= 64 &&
+	    new_size > old_size && (oldtype->ctype.modifiers & MOD_UNSIGNED) &&
+	    (old->value & (1ULL << 63)))
+		return;
+
 	// For pointers and integers, we can just move the value around
 	expr->type = EXPR_VALUE;
 	expr->taint = old->taint;
@@ -144,16 +149,60 @@ Int:
 
 Float:
 	if (!is_float_type(newtype)) {
-		value = (long long)old->fvalue;
+		long double fval = old->fvalue;
+
+		if (is_bool_type(newtype)) {
+			expr->type = EXPR_VALUE;
+			expr->taint = 0;
+			expr->ctype = newtype;
+			expr->value = (fval != 0);
+			return;
+		}
+		if (new_size <= 0 || new_size > 64 || !__builtin_isfinite(fval))
+			return;
+		if (newtype->ctype.modifiers & MOD_UNSIGNED) {
+			unsigned long long uval;
+			if (!(fval > -1.0L && fval < 0x1p64L))
+				return;
+			uval = (fval <= 0.0L) ? 0ULL : (unsigned long long)fval;
+			if (new_size < 64 && uval >= (1ULL << new_size))
+				return;
+			value = (long long)uval;
+		} else {
+			unsigned long long lim = 1ULL << (new_size - 1);
+			unsigned long long umag;
+			if (fval >= 0.0L) {
+				if (!(fval < 0x1p63L))
+					return;
+				umag = (unsigned long long)fval;
+				if (umag >= lim)
+					return;
+				value = (long long)umag;
+			} else {
+				long double mag = -fval;
+				if (!(mag < 0x1p64L))
+					return;
+				umag = (unsigned long long)mag;
+				if (umag > lim)
+					return;
+				value = (long long)(0ULL - umag);
+			}
+		}
 		expr->type = EXPR_VALUE;
 		expr->taint = 0;
 		expr->ctype = newtype;
 		goto Int;
 	}
 
-	if (!is_float_type(oldtype))
-		expr->fvalue = (long double)get_longlong(old);
-	else
+	if (!is_float_type(oldtype)) {
+		if ((oldtype->ctype.modifiers & MOD_UNSIGNED) &&
+		    old_size > 64 && (old->value & (1ULL << 63)))
+			return;
+		if (oldtype->ctype.modifiers & MOD_UNSIGNED)
+			expr->fvalue = (long double)(unsigned long long)get_longlong(old);
+		else
+			expr->fvalue = (long double)get_longlong(old);
+	} else
 		expr->fvalue = old->fvalue;
 
 	if (newtype->rank <= 0) {
@@ -199,6 +248,8 @@ static int simplify_int_binop(struct expression *expr, struct symbol *ctype)
 			return 0;
 	}
 	if (left->type != EXPR_VALUE)
+		return 0;
+	if (!ctype || ctype->bit_size <= 0 || ctype->bit_size > 64)
 		return 0;
 	l = left->value; r = right->value;
 	is_signed = !(ctype->ctype.modifiers & MOD_UNSIGNED);
@@ -304,6 +355,8 @@ static int simplify_cmp_binop(struct expression *expr, struct symbol *ctype)
 	signed long long sl, sr;
 
 	if (left->type != EXPR_VALUE || right->type != EXPR_VALUE)
+		return 0;
+	if (!ctype || ctype->bit_size <= 0 || ctype->bit_size > 64)
 		return 0;
 	l = left->value; r = right->value;
 	mask = sign_bit(ctype->bit_size);
@@ -665,7 +718,15 @@ static struct expression *constant_symbol_value(struct symbol *sym, int offset)
 {
 	struct expression *value;
 
+	if (offset < 0)
+		return NULL;
+	if (sym->ctype.modifiers & MOD_VOLATILE)
+		return NULL;
 	if (sym->ctype.modifiers & MOD_ACCESS)
+		return NULL;
+	if ((sym->ctype.modifiers & (MOD_TOPLEVEL | MOD_STATIC)) &&
+	    !(sym->ctype.modifiers & MOD_CONST) &&
+	    !sym->string && sym->ident)
 		return NULL;
 	value = sym->initializer;
 	if (!value)
@@ -707,6 +768,8 @@ static int expand_dereference(struct expression *expr)
 	 */
 	if (expr->ctype->ctype.modifiers & MOD_NODEREF)
 		warning(unop->pos, "dereference of noderef expression");
+	if (expr->ctype->ctype.modifiers & MOD_VOLATILE)
+		return SIDE_EFFECTS;
 
 	/*
 	 * Is it "symbol" or "symbol + offset"?
@@ -732,7 +795,7 @@ static int expand_dereference(struct expression *expr)
 			if (value->type == EXPR_VALUE) {
 				if (!is_integral_type(ctype))
 					return UNSAFE;
-				if (is_bitfield_type(value->ctype))
+				if (is_bitfield_type(ctype) || is_bitfield_type(value->ctype))
 					return UNSAFE;
 				expr->type = EXPR_VALUE;
 				expr->value = value->value;
@@ -866,7 +929,8 @@ static int expand_cast(struct expression *expr)
 	/* Simplify normal integer casts.. */
 	if (target->type == EXPR_VALUE || target->type == EXPR_FVALUE) {
 		cast_value(expr, expr->ctype, target);
-		return 0;
+		if (expr->type == EXPR_VALUE || expr->type == EXPR_FVALUE)
+			return 0;
 	}
 	return cost + 1;
 }
