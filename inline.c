@@ -345,13 +345,23 @@ static struct expression * copy_expression(struct expression *expr)
 		}
 		break;
 	}
-	case EXPR_GENERIC:
+	case EXPR_GENERIC: {
+		struct type_expression *map, **p;
 		expr = dup_expression(expr);
 		expr->control = copy_expression(expr->control);
-		if (!evaluate_expression(expr))
-			return NULL;
-		expr = copy_expression(expr);
+		expr->def = copy_expression(expr->def);
+		p = &expr->map;
+		for (map = expr->map; map; map = map->next) {
+			struct type_expression *new_map = __alloc_type_expression(0);
+			*new_map = *map;
+			new_map->type = copy_type(map->type);
+			new_map->expr = copy_expression(map->expr);
+			*p = new_map;
+			p = &new_map->next;
+		}
+		*p = NULL;
 		break;
+	}
 
 	default:
 		warning(expr->pos, "trying to copy expression type %d", expr->type);
