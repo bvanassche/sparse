@@ -518,6 +518,9 @@ static void kill_dead_stores_bb(pseudo_t pseudo, unsigned long generation, struc
 		case OP_CALL:
 			if (!local)
 				return;
+			continue;
+		case OP_ASM:
+			return;
 		default:
 			continue;
 		}

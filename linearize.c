@@ -98,7 +98,7 @@ const char *show_label(struct basic_block *bb)
 const char *show_pseudo(pseudo_t pseudo)
 {
 	static int n;
-	static char buffer[4][64];
+	static char buffer[4][256];
 	char *buf;
 	int i;
 
@@ -113,23 +113,23 @@ const char *show_pseudo(pseudo_t pseudo)
 		struct expression *expr;
 
 		if (!sym) {
-			snprintf(buf, 64, "<bad symbol>");
+			snprintf(buf, sizeof(buffer[0]), "<bad symbol>");
 			break;
 		}
 		if (sym->bb_target) {
-			snprintf(buf, 64, "%s", show_label(sym->bb_target));
+			snprintf(buf, sizeof(buffer[0]), "%s", show_label(sym->bb_target));
 			break;
 		}
 		if (sym->ident) {
-			snprintf(buf, 64, "%s", show_ident(sym->ident));
+			snprintf(buf, sizeof(buffer[0]), "%s", show_ident(sym->ident));
 			break;
 		}
 		expr = sym->initializer;
-		snprintf(buf, 64, "<anon symbol:%p>", verbose ? sym : NULL);
+		snprintf(buf, sizeof(buffer[0]), "<anon symbol:%p>", verbose ? sym : NULL);
 		if (expr) {
 			switch (expr->type) {
 			case EXPR_VALUE:
-				snprintf(buf, 64, "<symbol value: %lld>", expr->value);
+				snprintf(buf, sizeof(buffer[0]), "<symbol value: %lld>", expr->value);
 				break;
 			case EXPR_STRING:
 				return show_string(expr->string);
@@ -140,30 +140,30 @@ const char *show_pseudo(pseudo_t pseudo)
 		break;
 	}
 	case PSEUDO_REG:
-		i = snprintf(buf, 64, "%%r%d", pseudo->nr);
-		if (pseudo->ident)
-			sprintf(buf+i, "(%s)", show_ident(pseudo->ident));
+		i = snprintf(buf, sizeof(buffer[0]), "%%r%d", pseudo->nr);
+		if (pseudo->ident && i < (int)sizeof(buffer[0]))
+			snprintf(buf+i, sizeof(buffer[0]) - i, "(%s)", show_ident(pseudo->ident));
 		break;
 	case PSEUDO_VAL: {
 		long long value = pseudo->value;
 		if (value > 1000 || value < -1000)
-			snprintf(buf, 64, "$%#llx", value);
+			snprintf(buf, sizeof(buffer[0]), "$%#llx", value);
 		else
-			snprintf(buf, 64, "$%lld", value);
+			snprintf(buf, sizeof(buffer[0]), "$%lld", value);
 		break;
 	}
 	case PSEUDO_ARG:
-		snprintf(buf, 64, "%%arg%d", pseudo->nr);
+		snprintf(buf, sizeof(buffer[0]), "%%arg%d", pseudo->nr);
 		break;
 	case PSEUDO_PHI:
-		i = snprintf(buf, 64, "%%phi%d", pseudo->nr);
-		if (pseudo->ident)
-			sprintf(buf+i, "(%s)", show_ident(pseudo->ident));
+		i = snprintf(buf, sizeof(buffer[0]), "%%phi%d", pseudo->nr);
+		if (pseudo->ident && i < (int)sizeof(buffer[0]))
+			snprintf(buf+i, sizeof(buffer[0]) - i, "(%s)", show_ident(pseudo->ident));
 		break;
 	case PSEUDO_UNDEF:
 		return "UNDEF";
 	default:
-		snprintf(buf, 64, "<bad pseudo type %d>", pseudo->type);
+		snprintf(buf, sizeof(buffer[0]), "<bad pseudo type %d>", pseudo->type);
 	}
 	return buf;
 }
@@ -1746,7 +1746,8 @@ static pseudo_t linearize_logical(struct entrypoint *ep, struct expression *expr
 	src2 = linearize_expression_to_bool(ep, expr->right);
 	src2 = cast_pseudo(ep, src2, &bool_ctype, ctype);
 	phi2 = alloc_phi(ep->active, src2, ctype);
-	link_phi(node, phi2);
+	if (phi2 != VOID)
+		link_phi(node, phi2);
 
 	// join
 	set_activeblock(ep, merge);
@@ -2154,6 +2155,8 @@ static pseudo_t linearize_asm_statement(struct entrypoint *ep, struct statement 
 
 	/* ... and the addresses for memory outputs */
 	FOR_EACH_PTR(stmt->asm_outputs, op) {
+		if (op->is_modify && !op->is_memory)
+			add_asm_input(ep, insn, op);
 		add_asm_output_address(ep, insn, op);
 	} END_FOR_EACH_PTR(op);
 
@@ -2166,7 +2169,8 @@ static pseudo_t linearize_asm_statement(struct entrypoint *ep, struct statement 
 
 	/* and finally, look if it clobbers memory */
 	FOR_EACH_PTR(stmt->asm_clobbers, clob) {
-		if (!strcmp(clob->string->data, "memory"))
+		if (clob->type == EXPR_STRING && clob->string &&
+		    !strcmp(clob->string->data, "memory"))
 			insn->clobber_memory = 1;
 	} END_FOR_EACH_PTR(clob);
 
@@ -2262,11 +2266,17 @@ static pseudo_t linearize_switch(struct entrypoint *ep, struct statement *stmt)
 			continue;
 		} else {
 			struct expression *case_to = case_stmt->case_to;
+			struct symbol *ctype = expr->ctype;
 			long long begin, end;
 
 			begin = end = case_stmt->case_expression->value;
 			if (case_to && case_to->type == EXPR_VALUE)
 				end = case_to->value;
+			if (ctype->bit_size > 0) {
+				bool is_signed = !(ctype->ctype.modifiers & MOD_UNSIGNED);
+				begin = bits_extend(begin, ctype->bit_size, is_signed);
+				end = bits_extend(end, ctype->bit_size, is_signed);
+			}
 			if (begin > end)
 				jmp = alloc_multijmp(bb_case, end, begin);
 			else
