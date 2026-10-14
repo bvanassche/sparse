@@ -117,6 +117,8 @@ struct decl_state {
 	unsigned long f_modifiers;		// function attributes
 	unsigned long ident_modifiers;		// declarator-id C23 attributes
 	unsigned long storage_class;
+	unsigned long typedef_mods;
+	unsigned int explicit_alignment;
 	unsigned int typedef_alignment;
 	unsigned char prefer_abstract;
 	unsigned char autotype;
@@ -199,6 +201,7 @@ struct symbol {
 			unsigned long	offset;
 			int		bit_size;
 			int bitint_width;
+			unsigned int explicit_alignment;
 			unsigned int bit_offset : 8;
 			unsigned int bogus_linear : 1;
 			unsigned int variadic : 1;
@@ -276,8 +279,8 @@ struct symbol {
 #define MOD_USERTYPE		0x00020000
 #define MOD_CONSTEXPR 0x00040000
 #define MOD_BITINT 0x00080000
-// MOD UNUSED		0x00100000
-// MOD UNUSED		0x00200000
+#define MOD_WEAK		0x00100000
+#define MOD_ALIGNED		0x00200000
 
 #define MOD_UNUSED		0x00400000
 #define MOD_SAFE		0x00800000	// non-null/non-trapping pointer
@@ -287,6 +290,8 @@ struct symbol {
 #define MOD_NODEREF		0x08000000
 #define MOD_NORETURN		0x10000000
 #define MOD_EXT_VISIBLE		0x20000000
+#define MOD_NONSTRING		0x40000000
+#define MOD_FCONST		0x80000000UL
 
 
 #define MOD_ACCESS	(MOD_ASSIGNED | MOD_ADDRESSABLE)
@@ -295,21 +300,22 @@ struct symbol {
 #define MOD_ESIGNED	(MOD_SIGNED | MOD_EXPLICITLY_SIGNED)
 #define MOD_SIGNEDNESS	(MOD_SIGNED | MOD_UNSIGNED | MOD_EXPLICITLY_SIGNED)
 #define MOD_SPECIFIER (MOD_SIGNEDNESS | MOD_BITINT)
-#define MOD_IGNORE	(MOD_STORAGE | MOD_ACCESS | MOD_USERTYPE | MOD_EXPLICITLY_SIGNED | MOD_EXT_VISIBLE | MOD_UNUSED | MOD_GNU_INLINE | MOD_CONSTEXPR)
+#define MOD_IGNORE	(MOD_STORAGE | MOD_ACCESS | MOD_USERTYPE | MOD_EXPLICITLY_SIGNED | MOD_EXT_VISIBLE | MOD_UNUSED | MOD_GNU_INLINE | MOD_WEAK | MOD_ALIGNED | MOD_NONSTRING | MOD_CONSTEXPR)
 #define MOD_QUALIFIER	(MOD_CONST | MOD_VOLATILE | MOD_RESTRICT)
 /* modifiers for function attributes */
-#define MOD_FUN_ATTR	(MOD_PURE|MOD_NORETURN)
+#define MOD_FUN_ATTR	(MOD_PURE|MOD_NORETURN|MOD_FCONST)
 #define MOD_PTRINHERIT	(MOD_QUALIFIER | MOD_ATOMIC | MOD_NODEREF | MOD_FUN_ATTR | MOD_NOCAST)
 /* modifiers preserved by typeof() operator */
 #define MOD_TYPEOF	(MOD_QUALIFIER | MOD_ATOMIC | MOD_NOCAST | MOD_SPECIFIER)
 /* like cvr-qualifiers but 'reversed' (OK: source <= target) */
-#define MOD_REV_QUAL	(MOD_PURE|MOD_NORETURN)
+#define MOD_REV_QUAL	(MOD_PURE|MOD_NORETURN|MOD_FCONST)
 /* do not warn when these are duplicated */
-#define MOD_DUP_OK	(MOD_UNUSED|MOD_GNU_INLINE|MOD_USERTYPE)
+#define MOD_DUP_OK	(MOD_UNUSED|MOD_GNU_INLINE|MOD_WEAK|MOD_ALIGNED|MOD_USERTYPE|MOD_NONSTRING|MOD_FUN_ATTR)
 /* must be part of the declared symbol, not its type */
 #define MOD_DECLARE                                                         \
 	(MOD_STORAGE | MOD_INLINE | MOD_TLS | MOD_GNU_INLINE | MOD_UNUSED | \
-	 MOD_PURE | MOD_NORETURN | MOD_EXT_VISIBLE | MOD_CONSTEXPR)
+	 MOD_PURE | MOD_NORETURN | MOD_FCONST | MOD_EXT_VISIBLE |           \
+	 MOD_CONSTEXPR | MOD_WEAK | MOD_ALIGNED | MOD_NONSTRING)
 
 /* Current parsing/evaluation function */
 extern struct symbol *current_fn;

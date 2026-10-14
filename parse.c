@@ -587,6 +587,8 @@ static struct init_keyword {
 	D("unused",		&attr_mod_op,		.mods = MOD_UNUSED),
 	D("maybe_unused",	&attr_mod_op,		.mods = MOD_UNUSED),
 	D("externally_visible",	&attr_mod_op,		.mods = MOD_EXT_VISIBLE),
+	D("weak",		&attr_mod_op,		.mods = MOD_WEAK),
+	D("nonstring",		&attr_mod_op,		.mods = MOD_NONSTRING),
 	D("force",		&attr_force_op),
 	D("bitwise",		&attr_bitwise_op,	.mods = MOD_BITWISE),
 	D("address_space",	&address_space_op),
@@ -595,11 +597,11 @@ static struct init_keyword {
 	D("noreturn",		&attr_fun_op,		.mods = MOD_NORETURN),
 	D("_Noreturn",		&attr_fun_op,		.mods = MOD_NORETURN),
 	D("pure",		&attr_fun_op,		.mods = MOD_PURE),
-	A("const",		&attr_fun_op,		.mods = MOD_PURE),
+	A("const",		&attr_fun_op,		.mods = MOD_FCONST),
 	D("gnu_inline",		&attr_fun_op,		.mods = MOD_GNU_INLINE),
 	D("nodiscard",		&ignore_attr_op),
 	D("fallthrough",	&ignore_attr_op),
-	D("unsequenced",	&attr_fun_op,		.mods = MOD_PURE),
+	D("unsequenced",	&attr_fun_op,		.mods = MOD_FCONST),
 	D("reproducible",	&attr_fun_op,		.mods = MOD_PURE),
 
 	/* Modes */
@@ -985,6 +987,8 @@ static struct token *struct_union_enum_specifier(enum type type,
 	apply_ctype(token->pos, &sym->ctype, &attr.ctype);
 	sym->packed |= attr.packed;
 	sym->has_aligned |= attr.has_aligned;
+	if (attr.explicit_alignment > sym->explicit_alignment)
+		sym->explicit_alignment = attr.explicit_alignment;
 	if (sym->type == SYM_ENUM && sym->packed && sym->has_aligned)
 		warning(sym->pos,
 			"Clang and GCC treat 'packed' and 'aligned' attributes on enum types differently");
@@ -1462,8 +1466,10 @@ static struct token *ignore_attribute(struct token *token, struct symbol *attr, 
 
 static struct token *attribute_packed(struct token *token, struct symbol *attr, struct decl_state *ctx)
 {
-	if (!ctx->ctype.alignment)
+	if (!ctx->explicit_alignment)
 		ctx->ctype.alignment = 1;
+	else
+		ctx->ctype.alignment = ctx->explicit_alignment;
 	ctx->packed = 1;
 	return token;
 }
@@ -1481,9 +1487,17 @@ static struct token *attribute_aligned(struct token *token, struct symbol *attr,
 	if (alignment <= 0 || alignment > INT_MAX || (alignment & (alignment - 1))) {
 		warning(token->pos, "I don't like non-power-of-2 alignments");
 		return token;
-	} else if (alignment > ctx->ctype.alignment)
-		ctx->ctype.alignment = alignment;
+	} else {
+		if (alignment > ctx->explicit_alignment)
+			ctx->explicit_alignment = alignment;
+		if (ctx->packed)
+			ctx->ctype.alignment = ctx->explicit_alignment;
+		else if (alignment > ctx->ctype.alignment)
+			ctx->ctype.alignment = alignment;
+	}
 	ctx->has_aligned = 1;
+	ctx->ctype.modifiers |= MOD_ALIGNED;
+	ctx->typedef_mods &= ~MOD_ALIGNED;
 	return token;
 }
 
@@ -1522,6 +1536,7 @@ static void apply_qualifier(struct position *pos, struct ctype *ctx, unsigned lo
 static struct token *attribute_modifier(struct token *token, struct symbol *attr, struct decl_state *ctx)
 {
 	apply_mod(&token->pos, &ctx->ctype.modifiers, attr->ctype.modifiers);
+	ctx->typedef_mods &= ~attr->ctype.modifiers;
 	return token;
 }
 
@@ -1779,8 +1794,9 @@ static struct token *attribute_specifier(struct token *token, struct symbol *sym
 
 static unsigned long decl_modifiers(struct decl_state *ctx)
 {
-	unsigned long mods = ctx->ctype.modifiers & MOD_DECLARE;
-	ctx->ctype.modifiers &= ~MOD_DECLARE;
+	unsigned long mask = MOD_DECLARE & ~ctx->typedef_mods;
+	unsigned long mods = ctx->ctype.modifiers & mask;
+	ctx->ctype.modifiers &= ~mask;
 	return ctx->storage_class | mods;
 }
 
@@ -1853,8 +1869,16 @@ static struct token *alignas_specifier(struct token *token, struct symbol *sym, 
 		warning(token->pos, "non-power-of-2 alignment");
 		return token;
 	}
-	if (alignment > ctx->ctype.alignment)
-		ctx->ctype.alignment = alignment;
+	if (alignment > 0) {
+		if ((unsigned int)alignment > ctx->explicit_alignment)
+			ctx->explicit_alignment = alignment;
+		if (ctx->packed)
+			ctx->ctype.alignment = ctx->explicit_alignment;
+		else if ((unsigned int)alignment > ctx->ctype.alignment)
+			ctx->ctype.alignment = alignment;
+		ctx->ctype.modifiers |= MOD_ALIGNED;
+		ctx->typedef_mods &= ~MOD_ALIGNED;
+	}
 	return token;
 }
 
@@ -1972,9 +1996,12 @@ static struct token *declaration_specifiers(struct token *token, struct decl_sta
 		if (s->type != SYM_KEYWORD) {
 			if (seen & Set_Any)
 				break;
+			unsigned long prev_mods = ctx->ctype.modifiers;
 			seen |= Set_S | Set_T;
 			ctx->ctype.base_type = s->ctype.base_type;
 			apply_ctype(token->pos, &ctx->ctype, &s->ctype);
+			ctx->typedef_mods |= (s->ctype.modifiers & ~prev_mods) &
+					     (MOD_ALIGNED | MOD_WEAK | MOD_NONSTRING);
 			if (s->ctype.alignment > ctx->typedef_alignment)
 				ctx->typedef_alignment = s->ctype.alignment;
 			token = token->next;
@@ -2464,6 +2491,7 @@ static struct token *pointer(struct token *token, struct decl_state *ctx)
 		ctx->ctype.as = NULL;
 		ctx->ctype.contexts = NULL;
 		ctx->ctype.alignment = 0;
+		ctx->explicit_alignment = 0;
 		ctx->typedef_alignment = 0;
 
 		token = handle_qualifiers(token->next, ctx);
@@ -2528,12 +2556,28 @@ static struct token *handle_bitfield(struct token *token, struct decl_state *ctx
 	return token;
 }
 
+static void apply_fn_ptr_modifiers(struct symbol *decl, unsigned long f_modifiers)
+{
+	struct symbol *base;
+
+	if (!decl)
+		return;
+	f_modifiers |= decl->ctype.modifiers & MOD_FUN_ATTR;
+	if (!f_modifiers)
+		return;
+	base = decl->ctype.base_type;
+	if (base && base->type == SYM_PTR &&
+	    base->ctype.base_type && base->ctype.base_type->type == SYM_FN)
+		base->ctype.modifiers |= f_modifiers;
+}
+
 static struct token *declaration_list(struct token *token, struct symbol_list **list)
 {
 	struct decl_state ctx = {.prefer_abstract = 0};
 	struct ctype saved;
-	unsigned long mod;
-	unsigned int saved_td_align;
+	unsigned long mod, saved_f_modifiers;
+	unsigned int saved_explicit_alignment, saved_td_align;
+	unsigned char saved_packed;
 
 	token = declaration_specifiers(token, &ctx);
 	if (ctx.opaque_fixed_enum)
@@ -2541,12 +2585,18 @@ static struct token *declaration_list(struct token *token, struct symbol_list **
 			     "'enum' underlying type may not be specified here");
 	mod = decl_modifiers(&ctx);
 	saved = ctx.ctype;
+	saved_packed = ctx.packed;
+	saved_explicit_alignment = ctx.explicit_alignment;
 	saved_td_align = ctx.typedef_alignment;
+	saved_f_modifiers = ctx.f_modifiers;
 	for (;;) {
 		struct symbol *decl = alloc_symbol(token->pos, SYM_NODE);
 		ctx.cleanup = NULL;
 		ctx.ident_modifiers = 0;
+		ctx.packed = saved_packed;
+		ctx.explicit_alignment = saved_explicit_alignment;
 		ctx.typedef_alignment = saved_td_align;
+		ctx.f_modifiers = saved_f_modifiers;
 		ctx.ident = &decl->ident;
 
 		token = declarator(token, &ctx);
@@ -2560,6 +2610,9 @@ static struct token *declaration_list(struct token *token, struct symbol_list **
 		decl->ctype = ctx.ctype;
 		decl->ctype.modifiers |= mod;
 		decl->cleanup = ctx.cleanup;
+		decl->packed = ctx.packed;
+		decl->explicit_alignment = ctx.explicit_alignment;
+		apply_fn_ptr_modifiers(decl, ctx.f_modifiers);
 		decl->endpos = token->pos;
 		if (ctx.has_auto) {
 			sparse_error(
@@ -2623,6 +2676,9 @@ static struct token *parameter_declaration(struct token *token, struct symbol *s
 	apply_modifiers(token->pos, &ctx);
 	sym->ctype = ctx.ctype;
 	sym->ctype.modifiers |= decl_modifiers(&ctx);
+	sym->packed = ctx.packed;
+	sym->explicit_alignment = ctx.explicit_alignment;
+	apply_fn_ptr_modifiers(sym, ctx.f_modifiers);
 	sym->endpos = token->pos;
 	sym->forced_arg = ctx.forced;
 	if (ctx.has_auto || ctx.autotype) {
@@ -2691,7 +2747,9 @@ struct token *typename(struct token *token, struct symbol **p, int *forced)
 	ctx.ctype.modifiers |= ctx.ident_modifiers;
 	apply_modifiers(token->pos, &ctx);
 	sym->ctype = ctx.ctype;
+	sym->packed = ctx.packed;
 	sym->c23_auto = ctx.autotype && ctx.has_auto;
+	sym->explicit_alignment = ctx.explicit_alignment;
 	sym->endpos = token->pos;
 	if (ctx.storage_class == MOD_USERTYPE)
 		sym->explicit_typedef = 1;
@@ -2702,6 +2760,10 @@ struct token *typename(struct token *token, struct symbol **p, int *forced)
 		sym->ctype.modifiers |= MOD_CONSTEXPR;
 	}
 	sym->ctype.modifiers |= mod | decl_modifiers(&ctx);
+	if (sym->ctype.base_type && sym->ctype.base_type->type == SYM_FN)
+		sym->ctype.modifiers |= ctx.f_modifiers;
+	else
+		apply_fn_ptr_modifiers(sym, ctx.f_modifiers);
 	if (forced)
 		*forced = ctx.forced;
 	return token;
@@ -3783,10 +3845,10 @@ struct token *external_declaration(struct token *token, struct symbol_list **lis
 	struct symbol *decl;
 	struct decl_state ctx = { .ident = &ident };
 	struct ctype saved;
-	unsigned long saved_f_modifiers;
-	unsigned int saved_td_align;
 	struct symbol *base_type;
-	unsigned long mod;
+	unsigned long mod, saved_f_modifiers;
+	unsigned int saved_explicit_alignment, saved_td_align;
+	unsigned char saved_packed;
 	int is_typedef;
 	bool delay_bind = false;
 
@@ -3822,9 +3884,11 @@ struct token *external_declaration(struct token *token, struct symbol_list **lis
 		sparse_error(ctx.opaque_fixed_enum_pos,
 			     "'enum' underlying type may not be specified here");
 
-	saved = ctx.ctype;
-	saved_f_modifiers = ctx.f_modifiers;
+	saved_packed = ctx.packed;
+	saved_explicit_alignment = ctx.explicit_alignment;
 	saved_td_align = ctx.typedef_alignment;
+	saved_f_modifiers = ctx.f_modifiers;
+	saved = ctx.ctype;
 	token = declarator(token, &ctx);
 	token = handle_asm_name(token, &ctx);
 	token = handle_attributes(token, &ctx);
@@ -3834,7 +3898,10 @@ struct token *external_declaration(struct token *token, struct symbol_list **lis
 	decl->ctype = ctx.ctype;
 	decl->ctype.modifiers |= mod;
 	decl->cleanup = ctx.cleanup;
+	decl->packed = ctx.packed;
 	decl->c23_auto = ctx.autotype && ctx.has_auto;
+	decl->explicit_alignment = ctx.explicit_alignment;
+	apply_fn_ptr_modifiers(decl, ctx.f_modifiers);
 	decl->endpos = token->pos;
 
 	/* Just a type declaration? */
@@ -4089,11 +4156,13 @@ struct token *external_declaration(struct token *token, struct symbol_list **lis
 		token = token->next;
 		ident = NULL;
 		decl = alloc_symbol(token->pos, SYM_NODE);
+		ctx.packed = saved_packed;
+		ctx.explicit_alignment = saved_explicit_alignment;
+		ctx.typedef_alignment = saved_td_align;
+		ctx.f_modifiers = saved_f_modifiers;
 		ctx.ctype = saved;
 		ctx.cleanup = NULL;
 		ctx.ident_modifiers = 0;
-		ctx.f_modifiers = saved_f_modifiers;
-		ctx.typedef_alignment = saved_td_align;
 		token = handle_attributes(token, &ctx);
 		token = declarator(token, &ctx);
 		token = handle_asm_name(token, &ctx);
@@ -4103,7 +4172,10 @@ struct token *external_declaration(struct token *token, struct symbol_list **lis
 		decl->ctype = ctx.ctype;
 		decl->ctype.modifiers |= mod;
 		decl->cleanup = ctx.cleanup;
+		decl->packed = ctx.packed;
 		decl->c23_auto = ctx.autotype && ctx.has_auto;
+		decl->explicit_alignment = ctx.explicit_alignment;
+		apply_fn_ptr_modifiers(decl, ctx.f_modifiers);
 		decl->endpos = token->pos;
 		if (!ident) {
 			sparse_error(token->pos, "expected identifier name in type definition");

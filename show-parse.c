@@ -138,6 +138,7 @@ static const char *show_modifiers(unsigned long mod, int term)
 		{ MOD_NODEREF, "[noderef]" },
 		{ MOD_NORETURN, "[noreturn]" },
 		{ MOD_PURE, "[pure]" },
+		{ MOD_FCONST, "[const]" },
 		{ MOD_SAFE, "[safe]" },
 		{ MOD_SIGNED, "[signed]" },
 		{ MOD_TLS, "[tls]" },
@@ -145,6 +146,9 @@ static const char *show_modifiers(unsigned long mod, int term)
 		{ MOD_UNSIGNED, "[unsigned]" },
 		{ MOD_UNUSED, "[unused]" },
 		{ MOD_USERTYPE, "[usertype]" },
+		{ MOD_WEAK, "[weak]" },
+		{ MOD_ALIGNED, "[aligned]" },
+		{ MOD_NONSTRING, "[nonstring]" },
 	};
 
 	for (i = 0; i < ARRAY_SIZE(mod_names); i++) {
@@ -1188,6 +1192,7 @@ int show_expression(struct expression *expr)
 	case EXPR_PTRSIZEOF:
 	case EXPR_ALIGNOF:
 	case EXPR_OFFSETOF:
+	case EXPR_HAS_ATTRIBUTE:
 		warning(expr->pos, "invalid expression after evaluation");
 		return 0;
 	case EXPR_CAST:

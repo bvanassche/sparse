@@ -2433,7 +2433,8 @@ static struct symbol *evaluate_member_dereference(struct expression *expr)
 	 * The member needs to take on the address space and modifiers of
 	 * the "parent" type.
 	 */
-	member = convert_to_as_mod(member, address_space, mod);
+	member = convert_to_as_mod(member, address_space,
+				    mod & (MOD_PTRINHERIT | MOD_CONSTEXPR));
 	ctype = get_base_type(member);
 
 	if (!lvalue_expression(deref)) {
@@ -4097,6 +4098,39 @@ struct symbol *evaluate_expression(struct expression *expr)
 
 	case EXPR_GENERIC:
 		return evaluate_generic_selection(expr);
+
+	case EXPR_HAS_ATTRIBUTE:
+		if (expr->has_attr_expr) {
+			struct expression *sub = expr->has_attr_expr;
+			while (sub && sub->type == EXPR_PREOP && sub->op == '(')
+				sub = sub->unop;
+			if (sub && sub->type == EXPR_SYMBOL) {
+				expr->has_attr_decl = true;
+				evaluate_expression(expr->has_attr_expr);
+			} else if (sub && sub->type == EXPR_DEREF) {
+				struct symbol *dctype = evaluate_expression(sub->deref);
+				if (dctype && sub->member) {
+					int offset = 0;
+					examine_symbol_type(dctype);
+					if (dctype->type == SYM_NODE)
+						dctype = dctype->ctype.base_type;
+					if (dctype && (dctype->type == SYM_STRUCT ||
+						       dctype->type == SYM_UNION)) {
+						expr->has_attr_sym = find_identifier(
+							sub->member, dctype->symbol_list, &offset);
+						expr->has_attr_decl = true;
+					}
+				}
+				evaluate_expression(expr->has_attr_expr);
+			} else {
+				evaluate_expression(expr->has_attr_expr);
+			}
+		}
+		if (expr->has_attr_sym)
+			examine_symbol_type(expr->has_attr_sym);
+		expr->ctype = &int_ctype;
+		expr->flags = CEF_SET_ICE;
+		return &int_ctype;
 
 	/* These can not exist as stand-alone expressions */
 	case EXPR_INITIALIZER:

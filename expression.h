@@ -65,6 +65,7 @@ enum expression_type {
 	EXPR_SLICE,
 	EXPR_OFFSETOF,
 	EXPR_GENERIC,
+	EXPR_HAS_ATTRIBUTE,
 };
 
 
@@ -264,6 +265,13 @@ struct expression {
 			struct expression *control;
 			struct expression *def;
 			struct type_expression *map;
+		};
+		// EXPR_HAS_ATTRIBUTE
+		struct {
+			struct symbol *has_attr_sym;
+			struct expression *has_attr_expr;
+			struct ident *has_attr_ident;
+			bool has_attr_decl;
 		};
 	};
 };

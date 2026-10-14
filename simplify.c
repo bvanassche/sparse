@@ -365,7 +365,7 @@ int kill_insn(struct instruction *insn, int force)
 			/* a "pure" function can be killed too */
 			struct symbol *fntype = first_symbol(insn->fntypes);
 
-			if (!(fntype->ctype.modifiers & MOD_PURE))
+			if (!(fntype->ctype.modifiers & (MOD_PURE | MOD_FCONST)))
 				return 0;
 		}
 		kill_use_list(insn->arguments);

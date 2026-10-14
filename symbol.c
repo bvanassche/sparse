@@ -141,19 +141,23 @@ static void lay_out_struct(struct symbol *sym, struct struct_union_info *info)
 		info->flex_array = sym;
 	}
 
-	alignment = info->packed ? 1 : sym->ctype.alignment;
+	bool packed = info->packed || sym->packed;
+
+	alignment = packed ? (sym->explicit_alignment ? : 1) : sym->ctype.alignment;
 	align_bit_mask = bytes_to_bits(alignment) - 1;
 
 	/*
 	 * Bitfields have some very special rules..
 	 */
 	if (is_bitfield_type (sym)) {
+		if (sym->explicit_alignment)
+			bit_size = (bit_size + align_bit_mask) & ~align_bit_mask;
 		unsigned long bit_offset = bit_size & align_bit_mask;
 		int room = bitfield_base_size(sym) - bit_offset;
 		// Zero-width fields just fill up the unit.
 		int width = base_size ? : (bit_offset ? room : 0);
 
-		if (width > room && !info->packed) {
+		if (width > room && !packed) {
 			bit_size = (bit_size + align_bit_mask) & ~align_bit_mask;
 			bit_offset = 0;
 		}
@@ -163,7 +167,7 @@ static void lay_out_struct(struct symbol *sym, struct struct_union_info *info)
 		info->bit_size = bit_size + width;
 		// warning (sym->pos, "bitfield: offset=%d:%d  size=:%d", sym->offset, sym->bit_offset, width);
 
-		if (info->packed && sym->type == SYM_NODE)
+		if (packed && sym->type == SYM_NODE)
 			sym->packed = 1;
 		return;
 	}
@@ -232,10 +236,13 @@ static struct symbol * examine_struct_union_type(struct symbol *sym, int advance
 		if (!member->ident)
 			examine_anonymous_member(member);
 
-		if (member->ctype.alignment > info.max_align && !sym->packed) {
+		unsigned long member_align = (sym->packed || member->packed)
+			? (member->explicit_alignment ? : 1)
+			: member->ctype.alignment;
+		if (member_align > info.max_align) {
 			// Unnamed bitfields do not affect alignment.
 			if (member->ident || !is_bitfield_type(member))
-				info.max_align = member->ctype.alignment;
+				info.max_align = member_align;
 		}
 
 		if (has_flexible_array(member))
@@ -245,7 +252,7 @@ static struct symbol * examine_struct_union_type(struct symbol *sym, int advance
 		fn(member, &info);
 	} END_FOR_EACH_PTR(member);
 
-	if (!sym->ctype.alignment)
+	if (sym->ctype.alignment < info.max_align)
 		sym->ctype.alignment = info.max_align;
 	bit_size = info.bit_size;
 	if (info.align_size) {
@@ -566,7 +573,7 @@ static struct symbol * examine_node_type(struct symbol *sym)
 	/* Pick up signedness information into the node */
 	sym->ctype.modifiers |= (MOD_SIGNEDNESS & base_type->ctype.modifiers);
 
-	if (!sym->ctype.alignment)
+	if (!sym->ctype.alignment || (!sym->packed && sym->ctype.alignment < alignment))
 		sym->ctype.alignment = alignment;
 
 	/* Unsized array? The size might come from the initializer.. */
@@ -885,8 +892,12 @@ static void inherit_declaration(struct symbol *sym, struct symbol *prev)
 {
 	unsigned long mods = prev->ctype.modifiers;
 
-	// inherit function attributes
-	sym->ctype.modifiers |= mods & MOD_FUN_ATTR;
+	// inherit function and declaration attributes
+	sym->ctype.modifiers |= mods & (MOD_FUN_ATTR | MOD_WEAK | MOD_ALIGNED | MOD_NONSTRING);
+	if ((mods & MOD_ALIGNED) && prev->ctype.alignment > sym->ctype.alignment)
+		sym->ctype.alignment = prev->ctype.alignment;
+	if (prev->explicit_alignment > sym->explicit_alignment)
+		sym->explicit_alignment = prev->explicit_alignment;
 }
 
 void check_declaration(struct symbol *sym)
@@ -906,6 +917,7 @@ void check_declaration(struct symbol *sym)
 		if (sym->ctype.modifiers & MOD_EXTERN) {
 			if ((next->ctype.modifiers & (MOD_TOPLEVEL|MOD_STATIC)) == MOD_TOPLEVEL) {
 				sym->same_symbol = next;
+				inherit_declaration(sym, next);
 				return;
 			}
 		}
