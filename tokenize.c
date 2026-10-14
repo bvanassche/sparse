@@ -98,14 +98,14 @@ const char *show_special(int val)
 
 const char *show_ident(const struct ident *ident)
 {
-	static char buff[4][256];
+	static char buff[4][4097];
 	static int n;
 	char *buffer;
 
 	if (!ident)
 		return "<noident>";
 	buffer = buff[3 & ++n];
-	sprintf(buffer, "%.*s", ident->len, ident->name);
+	snprintf(buffer, sizeof(buff[0]), "%.*s", ident->len, ident->name);
 	return buffer;
 }
 
@@ -230,11 +230,11 @@ const char *show_token(const struct token *token)
 			token->string->length - 1, 'L', '"');
 
 	case TOKEN_STREAMBEGIN:
-		sprintf(buffer, "<beginning of '%s'>", stream_name(token->pos.stream));
+		snprintf(buffer, sizeof(buffer), "<beginning of '%s'>", stream_name(token->pos.stream));
 		return buffer;
 
 	case TOKEN_STREAMEND:
-		sprintf(buffer, "<end of '%s'>", stream_name(token->pos.stream));
+		snprintf(buffer, sizeof(buffer), "<end of '%s'>", stream_name(token->pos.stream));
 		return buffer;
 
 	case TOKEN_UNTAINT:
@@ -244,6 +244,9 @@ const char *show_token(const struct token *token)
 	case TOKEN_ARG_COUNT:
 		sprintf(buffer, "<argcnt>");
 		return buffer;
+
+	case TOKEN_GNU_KLUDGE:
+		return ",";
 
 	default:
 		sprintf(buffer, "unhandled token type '%d' ", token_type(token));
@@ -287,6 +290,8 @@ const char *quote_token(const struct token *token)
 	case TOKEN_WIDE_STRING: 
 		return quote_char(token->string->data,
 			token->string->length - 1, 'L', '"');
+	case TOKEN_GNU_KLUDGE:
+		return ",";
 	default:
 		sprintf(buffer, "unhandled token type '%d' ", token_type(token));
 		return buffer;
@@ -427,7 +432,7 @@ got_eof:
 		c = '\\';
 		goto out;
 	}
-	if (stream->pos & Wnewline_eof)
+	if (stream->pos && Wnewline_eof)
 		warning(stream_pos(stream), "no newline at end of file");
 	else if (spliced)
 		warning(stream_pos(stream), "backslash-newline at end of file");
@@ -860,7 +865,7 @@ static struct ident *create_hashed_ident(const char *name, int len, unsigned lon
 
 	p = &hash_table[hash];
 	while ((ident = *p) != NULL) {
-		if (ident->len == (unsigned char) len) {
+		if (ident->len == (unsigned short) len) {
 			if (memcmp(name, ident->name, len) != 0)
 				goto next;
 
@@ -919,7 +924,7 @@ static int get_one_identifier(int c, stream_t *stream)
 	struct token *token;
 	struct ident *ident;
 	unsigned long hash;
-	char buf[256];
+	char buf[4096];
 	int len = 1;
 	int next;
 
@@ -929,11 +934,11 @@ static int get_one_identifier(int c, stream_t *stream)
 		next = nextchar(stream);
 		if (!(cclass[next + 1] & (Letter | Digit)))
 			break;
-		if (len >= sizeof(buf))
-			break;
-		hash = ident_hash_add(hash, next);
-		buf[len] = next;
-		len++;
+		if (len < sizeof(buf)) {
+			hash = ident_hash_add(hash, next);
+			buf[len] = next;
+			len++;
+		}
 	};
 	if (cclass[next + 1] & Quote) {
 		if (len == 1 && buf[0] == 'L') {

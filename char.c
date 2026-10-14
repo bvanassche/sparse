@@ -8,14 +8,15 @@
 
 static const char *parse_escape(const char *p, unsigned *val, const char *end, int bits, struct position pos)
 {
-	unsigned c = *p++;
+	unsigned c = (unsigned char)*p++;
 	unsigned d;
 	if (c != '\\') {
 		*val = c;
 		return p;
 	}
 
-	c = *p++;
+	if (p < end)
+		c = (unsigned char)*p++;
 	switch (c) {
 	case 'a': c = '\a'; break;
 	case 'b': c = '\b'; break;
