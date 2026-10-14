@@ -467,7 +467,7 @@ again:
 					lookup_member(in, expr->ident, NULL));
 			} else {
 				do_expression(U_R_VAL, expr->index);
-				in = in->ctype.base_type;
+				in = base_type(in);
 			}
 		} while ((expr = expr->down));
 	}
