@@ -59,10 +59,13 @@ static int context_increase(struct basic_block *bb, int entry)
 					continue;
 			} else if (current >= val)
 				continue;
-			warning(insn->pos, "context check failure");
+			if (Wcontext)
+				warning(insn->pos, "context check failure");
 			continue;
 		}
 		sum += val;
+		if (entry + sum < 0)
+			return sum;
 	} END_FOR_EACH_PTR(insn);
 	return sum;
 }
