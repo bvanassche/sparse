@@ -35,6 +35,7 @@
 #include "evaluate.h"
 
 static void copy_statement(struct statement *src, struct statement *dst);
+static struct expression *copy_expression(struct expression *expr);
 
 static struct expression * dup_expression(struct expression *expr)
 {
@@ -61,6 +62,64 @@ static struct symbol *copy_symbol(struct position pos, struct symbol *sym)
 		return sym;
 	}
 	return sym->replace;
+}
+
+static struct symbol *copy_type(struct symbol *type)
+{
+	if (!type)
+		return NULL;
+	switch (type->type) {
+	case SYM_NODE: {
+		struct symbol *base = copy_type(type->ctype.base_type);
+		struct symbol *n;
+		if (base == type->ctype.base_type)
+			return type;
+		n = alloc_symbol(type->pos, SYM_NODE);
+		*n = *type;
+		n->ctype.base_type = base;
+		if (base && base->bit_size < 0)
+			n->examined = 0;
+		return n;
+	}
+	case SYM_ARRAY: {
+		struct symbol *elem = copy_type(type->ctype.base_type);
+		struct expression *size = copy_expression(type->array_size);
+		struct symbol *arr;
+		if (elem == type->ctype.base_type && size == type->array_size && !type->array_size)
+			return type;
+		arr = alloc_symbol(type->pos, SYM_ARRAY);
+		*arr = *type;
+		arr->ctype.base_type = elem;
+		arr->array_size = size;
+		if (type->array_size || elem != type->ctype.base_type)
+			arr->examined = 0;
+		return arr;
+	}
+	case SYM_PTR: {
+		struct symbol *base = copy_type(type->ctype.base_type);
+		struct symbol *ptr;
+		if (base == type->ctype.base_type)
+			return type;
+		ptr = alloc_symbol(type->pos, SYM_PTR);
+		*ptr = *type;
+		ptr->ctype.base_type = base;
+		return ptr;
+	}
+	case SYM_TYPEOF:
+	case SYM_TYPEOF_UNQUAL: {
+		struct expression *init = copy_expression(type->initializer);
+		struct symbol *t;
+		if (init == type->initializer)
+			return type;
+		t = alloc_symbol(type->pos, type->type);
+		*t = *type;
+		t->initializer = init;
+		t->examined = 0;
+		return t;
+	}
+	default:
+		return type;
+	}
 }
 
 static struct symbol_list *copy_symbol_list(struct symbol_list *src)
@@ -155,11 +214,19 @@ static struct expression * copy_expression(struct expression *expr)
 
 	/* Cast/sizeof/__alignof__ */
 	case EXPR_CAST:
-		if (!expr->cast_expression)
-			return NULL;
-		if (expr->cast_expression->type == EXPR_INITIALIZER) {
+		if (!expr->cast_expression) {
+			struct symbol *cast_type = copy_type(expr->cast_type);
+			if (cast_type != expr->cast_type) {
+				expr = dup_expression(expr);
+				expr->cast_type = cast_type;
+			}
+			return expr;
+		}
+		if (expr->cast_expression->type == EXPR_INITIALIZER ||
+		    (expr->cast_type && expr->cast_type->ctype.base_type &&
+		     expr->cast_type->ctype.base_type->type == SYM_UNION)) {
 			struct expression *cast = expr->cast_expression;
-			struct symbol *sym = expr->cast_type;
+			struct symbol *sym = copy_type(expr->cast_type);
 			expr = dup_expression(expr);
 			expr->cast_expression = copy_expression(cast);
 			expr->cast_type = alloc_symbol(sym->pos, sym->type);
@@ -172,10 +239,12 @@ static struct expression * copy_expression(struct expression *expr)
 	case EXPR_PTRSIZEOF:
 	case EXPR_ALIGNOF: {
 		struct expression *cast = copy_expression(expr->cast_expression);
-		if (cast == expr->cast_expression)
+		struct symbol *cast_type = copy_type(expr->cast_type);
+		if (cast == expr->cast_expression && cast_type == expr->cast_type)
 			break;
 		expr = dup_expression(expr);
 		expr->cast_expression = cast;
+		expr->cast_type = cast_type;
 		break;
 	}
 
@@ -343,8 +412,10 @@ static struct statement *copy_one_statement(struct statement *stmt)
 		newstmt->declaration = NULL;
 		FOR_EACH_PTR(stmt->declaration, sym) {
 			struct symbol *newsym = copy_symbol(stmt->pos, sym);
-			if (newsym != sym)
+			if (newsym != sym) {
+				newsym->ctype.base_type = copy_type(newsym->ctype.base_type);
 				newsym->initializer = copy_expression(sym->initializer);
+			}
 			add_symbol(&newstmt->declaration, newsym);
 		} END_FOR_EACH_PTR(sym);
 		stmt = newstmt;
@@ -424,10 +495,20 @@ static struct statement *copy_one_statement(struct statement *stmt)
 		break;		
 	}
 	case STMT_ITERATOR: {
+		struct symbol_list *old_syms = stmt->iterator_syms;
+		struct symbol *sym;
 		stmt = dup_statement(stmt);
 		stmt->iterator_break = copy_symbol(stmt->pos, stmt->iterator_break);
 		stmt->iterator_continue = copy_symbol(stmt->pos, stmt->iterator_continue);
-		stmt->iterator_syms = copy_symbol_list(stmt->iterator_syms);
+		stmt->iterator_syms = NULL;
+		FOR_EACH_PTR(old_syms, sym) {
+			struct symbol *newsym = copy_symbol(stmt->pos, sym);
+			if (newsym != sym) {
+				newsym->ctype.base_type = copy_type(newsym->ctype.base_type);
+				newsym->initializer = copy_expression(sym->initializer);
+			}
+			add_symbol(&stmt->iterator_syms, newsym);
+		} END_FOR_EACH_PTR(sym);
 
 		stmt->iterator_pre_statement = copy_one_statement(stmt->iterator_pre_statement);
 		stmt->iterator_pre_condition = copy_expression(stmt->iterator_pre_condition);
@@ -542,6 +623,8 @@ int inline_function(struct expression *expr, struct symbol *sym)
 
 		if (name) {
 			*a = *name;
+			a->bb_target = NULL;
+			a->pseudo = NULL;
 			set_replace(name, a);
 			add_symbol(&fn_symbol_list, a);
 			a->initializer = arg;
@@ -556,6 +639,10 @@ int inline_function(struct expression *expr, struct symbol *sym)
 		NEXT_PTR_LIST(name);
 	} END_FOR_EACH_PTR(arg);
 	FINISH_PTR_LIST(name);
+
+	FOR_EACH_PTR(arg_decl, name) {
+		name->ctype.base_type = copy_type(name->ctype.base_type);
+	} END_FOR_EACH_PTR(name);
 
 	copy_statement(fn->inline_stmt, stmt);
 
