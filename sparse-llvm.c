@@ -86,21 +86,17 @@ static LLVMTypeRef sym_array_type(struct symbol *sym)
 	struct symbol *base_type;
 
 	base_type = sym->ctype.base_type;
-	/* empty struct is undefined [6.7.2.1(8)] */
-	assert(base_type->bit_size > 0);
-
 	elem_type = symbol_type(base_type);
 	if (!elem_type)
 		return NULL;
 
-	return LLVMArrayType(elem_type, sym->bit_size / base_type->bit_size);
+	return LLVMArrayType(elem_type, base_type->bit_size > 0 ? sym->bit_size / base_type->bit_size : 0);
 }
-
-#define MAX_STRUCT_MEMBERS 64
 
 static LLVMTypeRef sym_struct_type(struct symbol *sym)
 {
-	LLVMTypeRef elem_types[MAX_STRUCT_MEMBERS];
+	unsigned n_memb = symbol_list_size(sym->symbol_list);
+	LLVMTypeRef *elem_types = calloc(n_memb, sizeof(LLVMTypeRef));
 	struct symbol *member;
 	char buffer[256];
 	LLVMTypeRef ret;
@@ -114,14 +110,13 @@ static LLVMTypeRef sym_struct_type(struct symbol *sym)
 	FOR_EACH_PTR(sym->symbol_list, member) {
 		LLVMTypeRef member_type;
 
-		assert(nr < MAX_STRUCT_MEMBERS);
-
 		member_type = symbol_type(member);
 
 		elem_types[nr++] = member_type; 
 	} END_FOR_EACH_PTR(member);
 
 	LLVMStructSetBody(ret, elem_types, nr, 0 /* packed? */); 
+	free(elem_types);
 	return ret;
 }
 
@@ -663,11 +658,11 @@ static void output_op_compare(struct function *fn, struct instruction *insn)
 	LLVMValueRef lhs, rhs, target;
 	char target_name[64];
 
-	lhs = pseudo_to_value(fn, NULL, insn->src1);
+	lhs = pseudo_to_value(fn, insn->itype, insn->src1);
 	if (insn->src2->type == PSEUDO_VAL)
 		rhs = constant_value(insn->src2->value, LLVMTypeOf(lhs));
 	else
-		rhs = pseudo_to_value(fn, NULL, insn->src2);
+		rhs = pseudo_to_value(fn, insn->itype, insn->src2);
 	if (!rhs)
 		rhs = LLVMGetUndef(symbol_type(insn->type));
 
@@ -785,7 +780,7 @@ static LLVMValueRef bool_value(struct function *fn, LLVMValueRef value)
 static void output_op_cbr(struct function *fn, struct instruction *br)
 {
 	LLVMValueRef cond = bool_value(fn,
-			pseudo_to_value(fn, NULL, br->cond));
+			pseudo_to_value(fn, br->type ? br->type : &int_ctype, br->cond));
 
 	LLVMBuildCondBr(fn->builder, cond,
 			br->bb_true->priv,
@@ -802,7 +797,7 @@ static void output_op_sel(struct function *fn, struct instruction *insn)
 	LLVMValueRef target, src1, src2, src3;
 	char name[MAX_PSEUDO_NAME];
 
-	src1 = bool_value(fn, pseudo_to_value(fn, NULL, insn->src1));
+	src1 = bool_value(fn, pseudo_to_value(fn, insn->itype ? insn->itype : insn->type, insn->src1));
 	src2 = get_operand(fn, insn->type, insn->src2);
 	src3 = get_operand(fn, insn->type, insn->src3);
 
@@ -1001,7 +996,7 @@ static void output_op_setval(struct function *fn, struct instruction *insn)
 
 	switch (val->type) {
 	case EXPR_LABEL:
-		target = LLVMBlockAddress(fn->fn, val->symbol->bb_target->priv);
+		target = LLVMBlockAddress(fn->fn, val->label_symbol->bb_target->priv);
 		break;
 	default:
 		assert(0);
