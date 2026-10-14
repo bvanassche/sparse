@@ -187,7 +187,7 @@ struct basic_block {
 // and OP_BADOP if not. It also assigns the defining instruction
 // to ``DEF``.
 #define DEF_OPCODE(DEF, SRC)	\
-	(((SRC)->type == PSEUDO_REG && (DEF = (SRC)->def)) ? DEF->opcode : OP_BADOP)
+	(((SRC) && (SRC)->type == PSEUDO_REG && (DEF = (SRC)->def)) ? DEF->opcode : OP_BADOP)
 
 
 static inline void add_bb(struct basic_block_list **list, struct basic_block *bb)
