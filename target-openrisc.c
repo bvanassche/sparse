@@ -20,7 +20,7 @@ static void predefine_openrisc(const struct target *self)
 }
 
 const struct target target_openrisc = {
-	.mach = MACH_NDS32,
+	.mach = MACH_OPENRISC,
 	.bitness = ARCH_LP32,
 	.big_endian = true,
 
