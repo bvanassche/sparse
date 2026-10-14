@@ -753,8 +753,21 @@ static struct token *struct_union_enum_specifier(enum type type,
 		ctx->ctype.base_type = sym;
 		repos = &token->pos;
 		token = token->next;
-		if (!match_op(token, '{'))
+		if (!match_op(token, '{')) {
+			if (attr.designated_init) {
+				if (sym->type == SYM_STRUCT)
+					sym->designated_init = 1;
+				else
+					warning(token->pos, "attribute designated_init applied to non-structure type");
+			}
+			if (attr.transparent_union) {
+				if (sym->type == SYM_UNION)
+					sym->transparent_union = 1;
+				else
+					warning(token->pos, "attribute __transparent_union__ applied to non-union type");
+			}
 			return token;
+		}
 
 		// The following test is actually wrong for empty
 		// structs, but (1) they are not C99, (2) gcc does
@@ -782,6 +795,18 @@ static struct token *struct_union_enum_specifier(enum type type,
 	token = handle_attributes(token, &attr);
 	apply_ctype(token->pos, &sym->ctype, &attr.ctype);
 	sym->packed = attr.packed;
+	if (attr.designated_init) {
+		if (sym->type == SYM_STRUCT)
+			sym->designated_init = 1;
+		else
+			warning(token->pos, "attribute designated_init applied to non-structure type");
+	}
+	if (attr.transparent_union) {
+		if (sym->type == SYM_UNION)
+			sym->transparent_union = 1;
+		else
+			warning(token->pos, "attribute __transparent_union__ applied to non-union type");
+	}
 
 	sym->endpos = token->pos;
 
@@ -935,6 +960,7 @@ static struct token *parse_enum_declaration(struct token *token, struct symbol *
 		struct token *next = token->next;
 		struct decl_state ctx = { };
 		struct symbol *sym;
+		bool overflow = false;
 
 		// FIXME: only 'deprecated' should be accepted
 		next = handle_attributes(next, &ctx);
@@ -948,14 +974,41 @@ static struct token *parse_enum_declaration(struct token *token, struct symbol *
 		} else if (!ctype) {
 			ctype = &int_ctype;
 		} else if (is_int_type(ctype)) {
-			lastval++;
+			struct range crange = type_range(ctype);
+			if (is_signed_type(ctype) && (long long)lastval == crange.pos) {
+				if (ctype->bit_size < bits_in_int)
+					ctype = &int_ctype;
+				else if (ctype->bit_size < bits_in_long)
+					ctype = &long_ctype;
+				else if (ctype->bit_size < bits_in_longlong)
+					ctype = &llong_ctype;
+				else
+					ctype = &ullong_ctype;
+			} else if (!is_signed_type(ctype) && lastval == crange.pos) {
+				if (ctype->bit_size < bits_in_int - 1)
+					ctype = &int_ctype;
+				else if (ctype->bit_size < bits_in_int)
+					ctype = &uint_ctype;
+				else if (ctype->bit_size < bits_in_long)
+					ctype = &ulong_ctype;
+				else if (ctype->bit_size < bits_in_longlong)
+					ctype = &ullong_ctype;
+				else {
+					sparse_error(token->pos,
+						"enumerator value for '%s' overflows",
+						show_ident(token->ident));
+					overflow = true;
+				}
+			}
+			if (!overflow)
+				lastval++;
 		} else {
 			error_die(token->pos, "can't increment the last enum member");
 		}
 
 		if (!expr) {
 			expr = alloc_expression(token->pos, EXPR_VALUE);
-			expr->value = lastval;
+			expr->value = lastval & bits_mask(ctype->bit_size);
 			expr->ctype = ctype;
 		}
 
@@ -1135,7 +1188,7 @@ static struct token *attribute_packed(struct token *token, struct symbol *attr, 
 
 static struct token *attribute_aligned(struct token *token, struct symbol *attr, struct decl_state *ctx)
 {
-	int alignment = max_alignment;
+	long long alignment = max_alignment;
 	struct expression *expr = NULL;
 
 	if (match_op(token, '(')) {
@@ -1143,7 +1196,7 @@ static struct token *attribute_aligned(struct token *token, struct symbol *attr,
 		if (expr)
 			alignment = const_expression_value(expr);
 	}
-	if (alignment & (alignment-1)) {
+	if (alignment <= 0 || alignment > INT_MAX || (alignment & (alignment - 1))) {
 		warning(token->pos, "I don't like non-power-of-2 alignments");
 		return token;
 	} else if (alignment > ctx->ctype.alignment)
@@ -1222,7 +1275,7 @@ static struct token *attribute_address_space(struct token *token, struct symbol 
 	switch (token_type(token)) {
 	case TOKEN_NUMBER:
 		next = primary_expression(token, &expr);
-		if (expr->type != EXPR_VALUE)
+		if (expr->type != EXPR_VALUE || expr->value > INT_MAX)
 			goto invalid;
 		as = numerical_address_space(expr->value);
 		break;
@@ -1351,6 +1404,8 @@ static struct token *attribute_designated_init(struct token *token, struct symbo
 {
 	if (ctx->ctype.base_type && ctx->ctype.base_type->type == SYM_STRUCT)
 		ctx->ctype.base_type->designated_init = 1;
+	else if (!ctx->ctype.base_type)
+		ctx->designated_init = 1;
 	else
 		warning(token->pos, "attribute designated_init applied to non-structure type");
 	return token;
@@ -1363,6 +1418,8 @@ static struct token *attribute_transparent_union(struct token *token, struct sym
 
 	if (ctx->ctype.base_type && ctx->ctype.base_type->type == SYM_UNION)
 		ctx->ctype.base_type->transparent_union = 1;
+	else if (!ctx->ctype.base_type)
+		ctx->transparent_union = 1;
 	else
 		warning(token->pos, "attribute __transparent_union__ applied to non-union type");
 	return token;
@@ -1856,9 +1913,16 @@ static struct token *direct_declarator(struct token *token, struct decl_state *c
 
 	if (match_op(token, '(')) {
 		enum kind kind = which_func(token, p, ctx->prefer_abstract);
-		struct symbol *fn;
+		struct symbol *fn, *walk;
 		fn = alloc_indirect_symbol(token->pos, ctype, SYM_FN);
 		ctype->modifiers |= ctx->f_modifiers;
+		for (walk = fn->ctype.base_type; walk && walk->type == SYM_PTR; walk = walk->ctype.base_type) {
+			if (walk->ctype.contexts) {
+				concat_ptr_list((struct ptr_list *)walk->ctype.contexts,
+						(struct ptr_list **)&ctype->contexts);
+				walk->ctype.contexts = NULL;
+			}
+		}
 		token = token->next;
 		if (kind == K_R)
 			token = identifier_list(token, fn);
@@ -2440,7 +2504,8 @@ static void warn_label_usage(struct position def, struct position use, struct id
 	const char *id = show_ident(ident);
 	sparse_error(use, "label '%s' used outside statement expression", id);
 	info(def, "   label '%s' defined here", id);
-	current_fn->bogus_linear = 1;
+	if (current_fn)
+		current_fn->bogus_linear = 1;
 }
 
 void check_label_usage(struct symbol *label, struct position use_pos)

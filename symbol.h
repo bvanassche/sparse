@@ -115,6 +115,8 @@ struct decl_state {
 	unsigned char autotype;
 	unsigned char forced;
 	unsigned char packed;
+	unsigned char designated_init;
+	unsigned char transparent_union;
 };
 
 struct pseudo;

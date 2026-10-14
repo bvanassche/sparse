@@ -204,17 +204,27 @@ const char *show_as(struct ident *as)
 struct type_name {
 	char *start;
 	char *end;
+	char *buf_start;
+	char *buf_end;
 };
 
 static void FORMAT_ATTR(2) prepend(struct type_name *name, const char *fmt, ...)
 {
-	static char buffer[512];
+	static char buffer[4096];
 	int n;
 
 	va_list args;
 	va_start(args, fmt);
-	n = vsprintf(buffer, fmt, args);
+	n = vsnprintf(buffer, sizeof(buffer), fmt, args);
 	va_end(args);
+	if (n <= 0)
+		return;
+	if (n >= sizeof(buffer))
+		n = sizeof(buffer) - 1;
+	if (n > name->start - name->buf_start)
+		n = name->start - name->buf_start;
+	if (n <= 0)
+		return;
 
 	name->start -= n;
 	memcpy(name->start, buffer, n);
@@ -222,13 +232,21 @@ static void FORMAT_ATTR(2) prepend(struct type_name *name, const char *fmt, ...)
 
 static void FORMAT_ATTR(2) append(struct type_name *name, const char *fmt, ...)
 {
-	static char buffer[512];
+	static char buffer[4096];
 	int n;
 
 	va_list args;
 	va_start(args, fmt);
-	n = vsprintf(buffer, fmt, args);
+	n = vsnprintf(buffer, sizeof(buffer), fmt, args);
 	va_end(args);
+	if (n <= 0)
+		return;
+	if (n >= sizeof(buffer))
+		n = sizeof(buffer) - 1;
+	if (n > name->buf_end - name->end)
+		n = name->buf_end - name->end;
+	if (n <= 0)
+		return;
 
 	memcpy(name->end, buffer, n);
 	name->end += n;
@@ -314,17 +332,14 @@ deeper:
 	if (sym && (sym->type != SYM_NODE && sym->type != SYM_ARRAY &&
 		     sym->type != SYM_BITFIELD)) {
 		const char *s;
-		size_t len;
 
 		if (as)
 			prepend(name, "%s ", show_as(as));
 
-		if (sym && (sym->type == SYM_BASETYPE || sym->type == SYM_ENUM))
+		if (sym->type == SYM_BASETYPE || sym->type == SYM_ENUM)
 			mod &= ~MOD_SPECIFIER;
 		s = modifier_string(mod);
-		len = strlen(s);
-		name->start -= len;
-		memcpy(name->start, s, len);
+		prepend(name, "%s", s);
 		mod = 0;
 		as = NULL;
 	}
@@ -333,11 +348,9 @@ deeper:
 		goto out;
 
 	if ((typename = builtin_typename(sym))) {
-		int len = strlen(typename);
 		if (name->start != name->end)
-			*--name->start = ' ';
-		name->start -= len;
-		memcpy(name->start, typename, len);
+			prepend(name, " ");
+		prepend(name, "%s", typename);
 		goto out;
 	}
 
@@ -362,13 +375,13 @@ deeper:
 
 	case SYM_STRUCT:
 		if (name->start != name->end)
-			*--name->start = ' ';
+			prepend(name, " ");
 		prepend(name, "struct %s", show_ident(sym->ident));
 		goto out;
 
 	case SYM_UNION:
 		if (name->start != name->end)
-			*--name->start = ' ';
+			prepend(name, " ");
 		prepend(name, "union %s", show_ident(sym->ident));
 		goto out;
 
@@ -401,7 +414,7 @@ deeper:
 			append(name, " )");
 			was_ptr = 0;
 		}
-		append(name, "[%lld]", get_expression_value(sym->array_size));
+		append(name, "[%lld]", get_expression_value_silent(sym->array_size));
 		break;
 
 	case SYM_RESTRICT:
@@ -410,7 +423,7 @@ deeper:
 			break;
 		}
 		if (name->start != name->end)
-			*--name->start = ' ';
+			prepend(name, " ");
 		prepend(name, "restricted %s", show_ident(sym->ident));
 		goto out;
 
@@ -420,7 +433,7 @@ deeper:
 
 	default:
 		if (name->start != name->end)
-			*--name->start = ' ';
+			prepend(name, " ");
 		prepend(name, "unknown type %d", sym->type);
 		goto out;
 	}
@@ -441,10 +454,12 @@ out:
 
 void show_type(struct symbol *sym)
 {
-	char array[200];
+	char array[8192];
 	struct type_name name;
 
-	name.start = name.end = array+100;
+	name.start = name.end = array + 4096;
+	name.buf_start = array;
+	name.buf_end = array + sizeof(array) - 1;
 	do_show_type(sym, &name);
 	*name.end = 0;
 	printf("%s", name.start);
@@ -452,10 +467,12 @@ void show_type(struct symbol *sym)
 
 const char *show_typename(struct symbol *sym)
 {
-	static char array[200];
+	static char array[8192];
 	struct type_name name;
 
-	name.start = name.end = array+100;
+	name.start = name.end = array + 4096;
+	name.buf_start = array;
+	name.buf_end = array + sizeof(array) - 1;
 	do_show_type(sym, &name);
 	*name.end = 0;
 	return name.start;

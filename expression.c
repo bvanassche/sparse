@@ -290,8 +290,12 @@ static void get_number_value(struct expression *expr, struct token *token)
 				size = 2;
 				end++;
 			}
-		} else
+		} else if (c == '.' || c == 'e' || c == 'E' || c == 'p' || c == 'P' ||
+			   strchr(end, '.') || strchr(end, 'e') || strchr(end, 'E')) {
 			goto Float;
+		} else {
+			goto Enoint;
+		}
 	}
 	if (overflow)
 		goto Eoverflow;
@@ -402,8 +406,12 @@ static struct token *generic_selection(struct token *token, struct expression **
 			token = typename(token, &map->type, NULL);
 			token = expect(token, ':', "after typename");
 			token = assignment_expression(token, &map->expr);
-			*last = map;
-			last = &map->next;
+			if (!map->expr)
+				sparse_error(token->pos, "expected expression after ':'");
+			else {
+				*last = map;
+				last = &map->next;
+			}
 		} else if (match_ident(token, &default_ident)) {
 			if (expr->def) {
 				warning(token->pos, "multiple default in generic expression");
@@ -412,6 +420,8 @@ static struct token *generic_selection(struct token *token, struct expression **
 			token = token->next;
 			token = expect(token, ':', "after typename");
 			token = assignment_expression(token, &expr->def);
+			if (!expr->def)
+				sparse_error(token->pos, "expected expression after ':'");
 		}
 	}
 end:
