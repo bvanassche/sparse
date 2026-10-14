@@ -190,8 +190,13 @@ static void examine_symbol(struct symbol *sym, xmlNodePtr node)
 			if (!sym->ctype.base_type->aux) {
 				examine_symbol(sym->ctype.base_type, root_node);
 			}
-			xmlNewProp(child, BAD_CAST "base-type",
-			           xmlGetProp((xmlNodePtr)sym->ctype.base_type->aux, BAD_CAST "id"));
+			if (sym->ctype.base_type->aux) {
+				xmlChar *base_id = xmlGetProp((xmlNodePtr)sym->ctype.base_type->aux, BAD_CAST "id");
+				if (base_id) {
+					xmlNewProp(child, BAD_CAST "base-type", base_id);
+					xmlFree(base_id);
+				}
+			}
 		} else {
 			newProp(child, "base-type-builtin", base);
 		}
@@ -250,6 +255,8 @@ static void examine_macro(struct symbol *sym, xmlNodePtr node)
 
 static void examine_namespace(struct symbol *sym)
 {
+	if (sym->aux)		/*already visited */
+		return;
 	if (sym->ident && sym->ident->reserved)
 		return;
 
