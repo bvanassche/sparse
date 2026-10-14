@@ -891,6 +891,8 @@ static struct token *struct_union_enum_specifier(enum type type,
 				sym->rank = underlying->rank;
 			}
 			token = handle_attributes(token, &attr);
+			sym->packed |= attr.packed;
+			sym->has_aligned |= attr.has_aligned;
 			if (!match_op(token, '{')) {
 				ctx->opaque_fixed_enum = 1;
 				ctx->opaque_fixed_enum_pos = colon_pos;
@@ -972,6 +974,8 @@ static struct token *struct_union_enum_specifier(enum type type,
 		return token;
 	}
 
+	sym->packed |= attr.packed;
+	sym->has_aligned |= attr.has_aligned;
 	token = parse(token->next, sym);
 	token = expect(token, '}', "at end of specifier");
 	sym->defined = 1;
@@ -979,7 +983,11 @@ static struct token *struct_union_enum_specifier(enum type type,
 	attr.ctype.base_type = sym;
 	token = handle_attributes(token, &attr);
 	apply_ctype(token->pos, &sym->ctype, &attr.ctype);
-	sym->packed = attr.packed;
+	sym->packed |= attr.packed;
+	sym->has_aligned |= attr.has_aligned;
+	if (sym->type == SYM_ENUM && sym->packed && sym->has_aligned)
+		warning(sym->pos,
+			"Clang and GCC treat 'packed' and 'aligned' attributes on enum types differently");
 	if (attr.designated_init) {
 		if (sym->type == SYM_STRUCT)
 			sym->designated_init = 1;
@@ -1004,6 +1012,16 @@ static struct token *struct_union_enum_specifier(enum type type,
 			sym->bit_size = mtype->bit_size;
 			sym->ctype.alignment = mtype->ctype.alignment;
 			sym->rank = mtype->rank;
+		}
+	}
+	if (sym->type == SYM_ENUM && sym->packed && !sym->fixed_type &&
+	    !sym->has_mode && sym->ctype.base_type &&
+	    is_int_type(sym->ctype.base_type)) {
+		struct symbol *base = get_enum_base_type(sym->range, 1);
+		if (base && base != &bad_ctype) {
+			sym->ctype.base_type = base;
+			sym->ctype.modifiers &= ~MOD_SIGNEDNESS;
+			sym->ctype.modifiers |= (base->ctype.modifiers & MOD_SIGNEDNESS);
 		}
 	}
 
@@ -1045,24 +1063,6 @@ static struct token *union_specifier(struct token *token, struct symbol *sym, st
 	return struct_union_enum_specifier(SYM_UNION, token, ctx, parse_union_declaration);
 }
 
-///
-// safe right shift
-//
-// This allow to use a shift amount as big (or bigger)
-// than the width of the value to be shifted, in which case
-// the result is, of course, 0.
-static unsigned long long rshift(unsigned long long val, unsigned int n)
-{
-	if (n >= (sizeof(val) * 8))
-		return 0;
-	return val >> n;
-}
-
-struct range {
-	long long		neg;
-	unsigned long long	pos;
-};
-
 static void update_range(struct range *range, unsigned long long uval, struct symbol *vtype)
 {
 	long long sval = uval;
@@ -1074,24 +1074,6 @@ static void update_range(struct range *range, unsigned long long uval, struct sy
 		if (uval > range->pos)
 			range->pos = uval;
 	}
-}
-
-static int type_is_ok(struct symbol *type, struct range range)
-{
-	int shift = type->bit_size;
-	int is_unsigned = type->ctype.modifiers & MOD_UNSIGNED;
-
-	if (!is_unsigned)
-		shift--;
-	if (rshift(range.pos, shift))
-		return 0;
-	if (range.neg == 0)
-		return 1;
-	if (is_unsigned)
-		return 0;
-	if (rshift(~range.neg, shift))
-		return 0;
-	return 1;
 }
 
 static struct range type_range(struct symbol *type)
@@ -1315,20 +1297,9 @@ static struct token *parse_enum_declaration(struct token *token, struct symbol *
 			base_type = &bad_ctype;
 		} else if (!is_int_type(base_type))
 			;
-		else if (type_is_ok(&uint_ctype, range))
-			base_type = &uint_ctype;
-		else if (type_is_ok(&int_ctype, range))
-			base_type = &int_ctype;
-		else if (type_is_ok(&ulong_ctype, range))
-			base_type = &ulong_ctype;
-		else if (type_is_ok(&long_ctype, range))
-			base_type = &long_ctype;
-		else if (type_is_ok(&ullong_ctype, range))
-			base_type = &ullong_ctype;
-		else if (type_is_ok(&llong_ctype, range))
-			base_type = &llong_ctype;
 		else
-			base_type = &bad_ctype;
+			base_type = get_enum_base_type(range, parent->packed);
+		parent->range = range;
 		parent->ctype.base_type = base_type;
 		parent->ctype.modifiers |=
 			(base_type->ctype.modifiers & MOD_UNSIGNED);
@@ -1491,10 +1462,9 @@ static struct token *ignore_attribute(struct token *token, struct symbol *attr, 
 
 static struct token *attribute_packed(struct token *token, struct symbol *attr, struct decl_state *ctx)
 {
-	if (!ctx->ctype.alignment) {
+	if (!ctx->ctype.alignment)
 		ctx->ctype.alignment = 1;
-		ctx->packed = 1;
-	}
+	ctx->packed = 1;
 	return token;
 }
 
@@ -1513,6 +1483,7 @@ static struct token *attribute_aligned(struct token *token, struct symbol *attr,
 		return token;
 	} else if (alignment > ctx->ctype.alignment)
 		ctx->ctype.alignment = alignment;
+	ctx->has_aligned = 1;
 	return token;
 }
 
@@ -2004,6 +1975,8 @@ static struct token *declaration_specifiers(struct token *token, struct decl_sta
 			seen |= Set_S | Set_T;
 			ctx->ctype.base_type = s->ctype.base_type;
 			apply_ctype(token->pos, &ctx->ctype, &s->ctype);
+			if (s->ctype.alignment > ctx->typedef_alignment)
+				ctx->typedef_alignment = s->ctype.alignment;
 			token = token->next;
 			continue;
 		}
@@ -2422,12 +2395,14 @@ static struct token *direct_declarator(struct token *token, struct decl_state *c
 	} else if (match_op(token, '(') &&
 	    is_nested(token, &next, ctx->prefer_abstract)) {
 		struct symbol *base_type = ctype->base_type;
+		unsigned int saved_td_align = ctx->typedef_alignment;
 		if (token->next != next)
 			next = handle_attributes(token->next, ctx);
 		token = declarator(next, ctx);
 		token = expect(token, ')', "in nested declarator");
 		while (ctype->base_type != base_type)
 			ctype = &ctype->base_type->ctype;
+		ctx->typedef_alignment = saved_td_align;
 		p = NULL;
 	}
 
@@ -2459,6 +2434,7 @@ static struct token *direct_declarator(struct token *token, struct decl_state *c
 		return token;
 	}
 
+	bool saw_array = false;
 	while (match_op(token, '[') && !match_c23_attribute(token)) {
 		struct symbol *array;
 		array = alloc_indirect_symbol(token->pos, ctype, SYM_ARRAY);
@@ -2466,9 +2442,12 @@ static struct token *direct_declarator(struct token *token, struct decl_state *c
 		token = expect(token, ']', "in abstract_array_declarator");
 		array->endpos = token->pos;
 		ctype = &array->ctype;
+		saw_array = true;
 		if (match_c23_attribute(token))
 			token = handle_attributes(token, ctx);
 	}
+	if (saw_array && ctx->typedef_alignment > ctype->alignment)
+		ctype->alignment = ctx->typedef_alignment;
 	return token;
 }
 
@@ -2485,6 +2464,7 @@ static struct token *pointer(struct token *token, struct decl_state *ctx)
 		ctx->ctype.as = NULL;
 		ctx->ctype.contexts = NULL;
 		ctx->ctype.alignment = 0;
+		ctx->typedef_alignment = 0;
 
 		token = handle_qualifiers(token->next, ctx);
 		ctx->ctype.base_type->endpos = token->pos;
@@ -2553,6 +2533,7 @@ static struct token *declaration_list(struct token *token, struct symbol_list **
 	struct decl_state ctx = {.prefer_abstract = 0};
 	struct ctype saved;
 	unsigned long mod;
+	unsigned int saved_td_align;
 
 	token = declaration_specifiers(token, &ctx);
 	if (ctx.opaque_fixed_enum)
@@ -2560,10 +2541,12 @@ static struct token *declaration_list(struct token *token, struct symbol_list **
 			     "'enum' underlying type may not be specified here");
 	mod = decl_modifiers(&ctx);
 	saved = ctx.ctype;
+	saved_td_align = ctx.typedef_alignment;
 	for (;;) {
 		struct symbol *decl = alloc_symbol(token->pos, SYM_NODE);
 		ctx.cleanup = NULL;
 		ctx.ident_modifiers = 0;
+		ctx.typedef_alignment = saved_td_align;
 		ctx.ident = &decl->ident;
 
 		token = declarator(token, &ctx);
@@ -3801,6 +3784,7 @@ struct token *external_declaration(struct token *token, struct symbol_list **lis
 	struct decl_state ctx = { .ident = &ident };
 	struct ctype saved;
 	unsigned long saved_f_modifiers;
+	unsigned int saved_td_align;
 	struct symbol *base_type;
 	unsigned long mod;
 	int is_typedef;
@@ -3840,6 +3824,7 @@ struct token *external_declaration(struct token *token, struct symbol_list **lis
 
 	saved = ctx.ctype;
 	saved_f_modifiers = ctx.f_modifiers;
+	saved_td_align = ctx.typedef_alignment;
 	token = declarator(token, &ctx);
 	token = handle_asm_name(token, &ctx);
 	token = handle_attributes(token, &ctx);
@@ -4108,6 +4093,7 @@ struct token *external_declaration(struct token *token, struct symbol_list **lis
 		ctx.cleanup = NULL;
 		ctx.ident_modifiers = 0;
 		ctx.f_modifiers = saved_f_modifiers;
+		ctx.typedef_alignment = saved_td_align;
 		token = handle_attributes(token, &ctx);
 		token = declarator(token, &ctx);
 		token = handle_asm_name(token, &ctx);
