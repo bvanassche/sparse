@@ -50,7 +50,7 @@ static int cmp_sym(const void *m, const void *n)
 		ret = strcmp(stream_name(a_pos.stream),
 		             stream_name(b_pos.stream));
 		if (!ret)
-			return a_pos.line < b_pos.line;
+			return (a_pos.line > b_pos.line) - (a_pos.line < b_pos.line);
 	}
 	return ret;
 }
@@ -155,8 +155,10 @@ static void examine_symbol(struct symbol *sym)
 	case SYM_BITFIELD:
 	case SYM_FN:
 	case SYM_ARRAY:
+	case SYM_RESTRICT:
 		examine_symbol(sym->ctype.base_type);
 		break;
+	case SYM_LABEL:
 	case SYM_BASETYPE:
 		break;
 
