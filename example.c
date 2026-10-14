@@ -168,7 +168,7 @@ struct operand {
 
 static const char *show_op(struct bb_state *state, struct operand *op)
 {
-	static char buf[256][4];
+	static char buf[4][256];
 	static int bufnr;
 	char *p, *ret;
 	int nr;
