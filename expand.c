@@ -790,8 +790,13 @@ static int expand_comma(struct expression *expr)
 
 static int compare_types(int op, struct symbol *left, struct symbol *right)
 {
-	struct ctype c1 = {.base_type = left};
-	struct ctype c2 = {.base_type = right};
+	struct ctype c1 = left->type == SYM_NODE ? left->ctype : (struct ctype){.base_type = left};
+	struct ctype c2 = right->type == SYM_NODE ? right->ctype : (struct ctype){.base_type = right};
+
+	if (!c1.base_type || c1.base_type->type != SYM_ARRAY)
+		c1.as = NULL;
+	if (!c2.base_type || c2.base_type->type != SYM_ARRAY)
+		c2.as = NULL;
 	switch (op) {
 	case SPECIAL_EQUAL:
 		return !type_difference(&c1, &c2, MOD_IGN, MOD_IGN);
