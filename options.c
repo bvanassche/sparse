@@ -315,7 +315,9 @@ static void handle_onoff_switch_finalize(const struct flag flags[])
 
 static int handle_switch_setval(const char *arg, const char *opt, const struct flag *flag, int options)
 {
-	*(flag->flag) = flag->mask;
+	if (*opt != '\0')
+		return 0;
+	*(flag->flag) = (options & OPT_INVERSE) ? 0 : flag->mask;
 	return 1;
 }
 
@@ -548,7 +550,7 @@ static char **handle_switch_f(char *arg, char **next)
 
 static char **handle_switch_G(char *arg, char **next)
 {
-	if (!strcmp(arg, "G") && *next)
+	if (!strcmp(arg, "G") && next[1])
 		return next + 1; // "-G 0"
 	else
 		return next;     // "-G0" or (bogus) terminal "-G"
@@ -599,11 +601,12 @@ static void add_cmdline_include(char *filename)
 
 static char **handle_switch_i(char *arg, char **next)
 {
-	if (*next && !strcmp(arg, "include"))
-		add_cmdline_include(*++next);
-	else if (*next && !strcmp(arg, "imacros"))
-		add_cmdline_include(*++next);
-	else if (*next && !strcmp(arg, "isystem")) {
+	if (!strcmp(arg, "include") || !strcmp(arg, "imacros")) {
+		char *path = *++next;
+		if (!path)
+			die("missing argument for -%s option", arg);
+		add_cmdline_include(path);
+	} else if (*next && !strcmp(arg, "isystem")) {
 		char *path = *++next;
 		if (!path)
 			die("missing argument for -isystem option");
@@ -620,7 +623,7 @@ static char **handle_switch_i(char *arg, char **next)
 static char **handle_switch_M(char *arg, char **next)
 {
 	if (!strcmp(arg, "MF") || !strcmp(arg,"MQ") || !strcmp(arg,"MT")) {
-		if (!*next)
+		if (!next[1])
 			die("missing argument for -%s option", arg);
 		return next + 1;
 	}

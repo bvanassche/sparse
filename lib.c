@@ -128,13 +128,13 @@ static const char *show_stream_name(struct position pos)
 
 static void do_warn(const char *type, struct position pos, const char * fmt, va_list args)
 {
-	static char buffer[512];
+	static char buffer[4096];
 
 	/* Shut up warnings if position is bad_token.pos */
 	if (pos.type == TOKEN_BAD)
 		return;
 
-	vsprintf(buffer, fmt, args);	
+	vsnprintf(buffer, sizeof(buffer), fmt, args);
 
 	fflush(stdout);
 	fprintf(stderr, "%s:%d:%d: %s%s%s\n",
@@ -181,6 +181,7 @@ static void do_error(struct position pos, const char * fmt, va_list args)
 void warning(struct position pos, const char * fmt, ...)
 {
 	va_list args;
+	static unsigned int warnings = 0;
 
 	if (Wsparse_error) {
 		va_start(args, fmt);
@@ -194,9 +195,13 @@ void warning(struct position pos, const char * fmt, ...)
 		return;
 	}
 
-	if (!--fmax_warnings) {
+	if (++warnings > fmax_warnings) {
+		static int once = 0;
 		show_info = 0;
+		if (once)
+			return;
 		fmt = "too many warnings";
+		once = 1;
 	}
 
 	va_start(args, fmt);
@@ -256,11 +261,22 @@ void add_pre_buffer(const char *fmt, ...)
 	unsigned int size;
 	struct token *begin, *end;
 	char buffer[4096];
+	char *buf = buffer;
 
 	va_start(args, fmt);
 	size = vsnprintf(buffer, sizeof(buffer), fmt, args);
 	va_end(args);
-	begin = tokenize_buffer(buffer, size, &end);
+	if (size >= sizeof(buffer)) {
+		buf = malloc(size + 1);
+		if (!buf)
+			die("out of memory");
+		va_start(args, fmt);
+		vsnprintf(buf, size + 1, fmt, args);
+		va_end(args);
+	}
+	begin = tokenize_buffer(buf, size, &end);
+	if (buf != buffer)
+		free(buf);
 	*pre_buffer_next = begin;
 	pre_buffer_next = &end->next;
 }
