@@ -246,6 +246,8 @@ static struct symbol *base_type(struct symbol *node, unsigned long *modp, struct
 	return node;
 }
 
+#define MOD_IGN (MOD_QUALIFIER | MOD_FUN_ATTR)
+
 static int is_same_type(struct expression *expr, struct symbol *new)
 {
 	struct symbol *old = expr->ctype;
@@ -271,6 +273,13 @@ static int is_same_type(struct expression *expr, struct symbol *new)
 		 * Don't warn about MOD_NOCAST.
 		 */
 		if (difmod == MOD_CONST)
+			return 0;
+	}
+	if (old->type == SYM_PTR && new->type == SYM_PTR && oldas == newas &&
+	    (oldmod & MOD_NOCAST) == (newmod & MOD_NOCAST)) {
+		if (!type_difference(&old->ctype, &new->ctype,
+				     MOD_IGN | MOD_NODEREF, MOD_IGN | MOD_NODEREF) ||
+		    ((oldmod & MOD_NOCAST) && is_void_type(new->ctype.base_type)))
 			return 0;
 	}
 	if ((oldmod | newmod) & MOD_NOCAST) {
@@ -588,6 +597,10 @@ static struct symbol *evaluate_ptr_add(struct expression *expr, struct symbol *i
 		expression_error(expr, "arithmetics on pointers to functions");
 		return NULL;
 	}
+	if (!is_void_type(base) && base->bit_size < 0) {
+		expression_error(expr, "arithmetics on pointers to incomplete type");
+		return NULL;
+	}
 
 	/* Get the size of whatever the pointer points to */
 	multiply = is_void_type(base) ? 1 : bits_to_bytes(base->bit_size);
@@ -603,10 +616,10 @@ static struct symbol *evaluate_ptr_add(struct expression *expr, struct symbol *i
 		struct expression *val = alloc_expression(expr->pos, EXPR_VALUE);
 		unsigned long long v = index->value, mask;
 		mask = sign_bit(itype->bit_size);
-		if (v & mask)
+		if (!(itype->ctype.modifiers & MOD_UNSIGNED) && (v & mask))
 			v |= -mask;
 		else
-			v &= mask - 1;
+			v &= mask | (mask - 1);
 		v *= multiply;
 		v &= bits_mask(bits_in_pointer);
 		val->value = v;
@@ -637,8 +650,6 @@ static struct symbol *evaluate_ptr_add(struct expression *expr, struct symbol *i
 }
 
 static void examine_fn_arguments(struct symbol *fn);
-
-#define MOD_IGN (MOD_QUALIFIER | MOD_FUN_ATTR)
 
 const char *type_difference(struct ctype *c1, struct ctype *c2,
 	unsigned long mod1, unsigned long mod2)
@@ -812,6 +823,14 @@ static unsigned long target_qualifiers(struct symbol *type)
 	return mod;
 }
 
+static unsigned long cond_target_qualifiers(struct symbol *type)
+{
+	unsigned long mod = type->ctype.modifiers & (MOD_IGN | MOD_NODEREF | MOD_NOCAST);
+	if (type->ctype.base_type && type->ctype.base_type->type == SYM_ARRAY)
+		mod = 0;
+	return mod;
+}
+
 static struct symbol *evaluate_ptr_sub(struct expression *expr)
 {
 	const char *typediff;
@@ -833,6 +852,10 @@ static struct symbol *evaluate_ptr_sub(struct expression *expr)
 
 	if (is_function(lbase)) {
 		expression_error(expr, "subtraction of functions? Share your drugs");
+		return NULL;
+	}
+	if (!is_void_type(lbase) && lbase->bit_size < 0) {
+		expression_error(expr, "subtraction of pointers to incomplete type");
 		return NULL;
 	}
 
@@ -1222,7 +1245,7 @@ static struct symbol *evaluate_conditional_expression(struct expression *expr)
 		/* need to be lazier here */
 		lbase = examine_pointer_target(ltype);
 		rbase = examine_pointer_target(rtype);
-		qual = target_qualifiers(ltype) | target_qualifiers(rtype);
+		qual = cond_target_qualifiers(ltype) | cond_target_qualifiers(rtype);
 
 		if (lbase == &void_ctype) {
 			/* XXX: pointers to function should warn here */
@@ -1433,8 +1456,8 @@ static int check_assignment_types(struct symbol *target, struct expression **rp,
 		}
 		b1 = examine_pointer_target(t);
 		b2 = examine_pointer_target(s);
-		mod1 = t->ctype.modifiers & MOD_IGN;
-		mod2 = s->ctype.modifiers & MOD_IGN;
+		mod1 = t->ctype.modifiers & (MOD_IGN | MOD_NODEREF);
+		mod2 = s->ctype.modifiers & (MOD_IGN | MOD_NODEREF);
 		if (whitelist_pointers(b1, b2)) {
 			/*
 			 * assignments to/from void * are OK, provided that
@@ -2310,13 +2333,31 @@ static struct symbol *evaluate_ptrsizeof(struct expression *expr)
 	return size_t_ctype;
 }
 
+static bool is_incomplete_alignof_type(struct symbol *type, bool is_type)
+{
+	while (type && type->type == SYM_NODE)
+		type = type->ctype.base_type;
+	while (type && type->type == SYM_ARRAY) {
+		if (is_type && !type->array_size)
+			return true;
+		type = type->ctype.base_type;
+		while (type && type->type == SYM_NODE)
+			type = type->ctype.base_type;
+	}
+	return !type || (type->bit_size < 0 && type->type != SYM_FN);
+}
+
 static struct symbol *evaluate_alignof(struct expression *expr)
 {
 	struct symbol *type;
+	bool is_type = expr->cast_type != NULL;
 
 	type = evaluate_type_information(expr);
 	if (!type)
 		return NULL;
+
+	if (is_incomplete_alignof_type(type, is_type))
+		expression_error(expr, "cannot size alignment of incomplete type");
 
 	expr->type = EXPR_VALUE;
 	expr->value = type->ctype.alignment;
@@ -3268,7 +3309,11 @@ static struct symbol *evaluate_offsetof(struct expression *expr)
 			struct expression *idx = expr->index, *m;
 			struct symbol *i_type = evaluate_expression(idx);
 			unsigned old_idx_flags;
-			int i_class = classify_type(i_type, &i_type);
+			int i_class;
+
+			if (!i_type)
+				return NULL;
+			i_class = classify_type(i_type, &i_type);
 
 			if (!is_int(i_class)) {
 				expression_error(expr, "non-integer index");
@@ -3316,7 +3361,8 @@ static void check_label_declaration(struct position pos, struct symbol *label)
 		sparse_error(pos, "label '%s' was not declared", show_ident(label->ident));
 		/* fallthrough */
 	case NS_NONE:
-		current_fn->bogus_linear = 1;
+		if (current_fn)
+			current_fn->bogus_linear = 1;
 	default:
 		break;
 	}
@@ -3337,10 +3383,14 @@ static struct symbol *evaluate_generic_selection(struct expression *expr)
 	struct symbol source;
 	struct symbol *ctrl;
 
-	if (!evaluate_expression(expr->control))
+	if (!evaluate_expression(expr->control)) {
+		expr->ctype = &bad_ctype;
 		return NULL;
-	if (!(ctrl = degenerate(expr->control)))
+	}
+	if (!(ctrl = degenerate(expr->control))) {
+		expr->ctype = &bad_ctype;
 		return NULL;
+	}
 
 	source = *ctrl;
 	source.ctype.modifiers &= ~(MOD_QUALIFIER|MOD_ATOMIC);
@@ -3352,18 +3402,31 @@ static struct symbol *evaluate_generic_selection(struct expression *expr)
 			continue;
 
 		base = stype->ctype.base_type;
-		if (base->type == SYM_ARRAY && base->array_size) {
-			get_expression_value_silent(base->array_size);
-			if (base->array_size->type == EXPR_VALUE)
+		if (base && base->type == SYM_ARRAY) {
+			bool is_vla = false;
+			struct symbol *arr = base;
+			while (arr && arr->type == SYM_ARRAY) {
+				if (arr->array_size) {
+					get_expression_value_silent(arr->array_size);
+					if (arr->array_size->type != EXPR_VALUE) {
+						is_vla = true;
+						break;
+					}
+				}
+				arr = arr->ctype.base_type;
+				while (arr && arr->type == SYM_NODE)
+					arr = arr->ctype.base_type;
+			}
+			if (is_vla) {
+				sparse_error(stype->pos, "variable length array type in generic selection");
 				continue;
-			sparse_error(stype->pos, "variable length array type in generic selection");
-			continue;
+			}
 		}
 		if (is_func_type(stype)) {
 			sparse_error(stype->pos, "function type in generic selection");
 			continue;
 		}
-		if (stype->bit_size <= 0 || is_void_type(stype)) {
+		if (stype->bit_size < 0 || is_void_type(stype)) {
 			sparse_error(stype->pos, "incomplete type in generic selection");
 			continue;
 		}
@@ -3376,6 +3439,7 @@ static struct symbol *evaluate_generic_selection(struct expression *expr)
 	res = expr->def;
 	if (!res) {
 		sparse_error(expr->pos, "no generic selection for '%s'", show_typename(ctrl));
+		expr->ctype = &bad_ctype;
 		return NULL;
 	}
 
@@ -3682,7 +3746,11 @@ static void parse_asm_constraint(struct asm_operand *op)
 			break;
 		case '[':
 			// FIXME: symbolic matching constraint
-			return;
+			while (*str && *str != ']')
+				str++;
+			if (*str == ']')
+				str++;
+			break;
 
 		default:
 			if (arch_target->asm_constraint)

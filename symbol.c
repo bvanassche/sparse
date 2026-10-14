@@ -215,6 +215,11 @@ static struct symbol * examine_struct_union_type(struct symbol *sym, int advance
 	void (*fn)(struct symbol *, struct struct_union_info *);
 	struct symbol *member;
 
+	if (!sym->defined) {
+		sym->bit_size = -1;
+		return sym;
+	}
+
 	fn = advance ? lay_out_struct : lay_out_union;
 	FOR_EACH_PTR(sym->symbol_list, member) {
 		if (member->ctype.base_type == &autotype_ctype) {
@@ -298,9 +303,10 @@ static struct symbol * examine_array_type(struct symbol *sym)
 	if (!base_type)
 		return sym;
 
-	if (array_size) {	
-		bit_size = array_element_offset(base_type->bit_size,
-						get_expression_value_silent(array_size));
+	if (array_size) {
+		unsigned long count = get_expression_value_silent(array_size);
+		if (base_type->bit_size >= 0)
+			bit_size = array_element_offset(base_type->bit_size, count);
 		if (array_size->type != EXPR_VALUE) {
 			if (Wvla)
 				warning(array_size->pos, "Variable length array is used.");
