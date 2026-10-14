@@ -33,6 +33,7 @@
 #include <stdlib.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "lib.h"
 #include "allocate.h"
@@ -88,10 +89,7 @@ void *allocate(struct allocator_struct *desc, unsigned int size)
 		void **p = desc->freelist;
 		retval = p;
 		desc->freelist = *p;
-		do {
-			*p = NULL;
-			p++;
-		} while ((size -= sizeof(void *)) > 0);
+		memset(retval, 0, size);
 		return retval;
 	}
 
@@ -100,17 +98,19 @@ void *allocate(struct allocator_struct *desc, unsigned int size)
 	size = (size + alignment - 1) & ~(alignment-1);
 	if (!blob || blob->left < size) {
 		unsigned int offset, chunking = desc->chunking;
-		struct allocation_blob *newblob = blob_alloc(chunking);
+		struct allocation_blob *newblob;
+
+		offset = offsetof(struct allocation_blob, data);
+		offset = (offset + alignment - 1) & ~(alignment-1);
+		if (size > chunking - offset)
+			die("alloc too big");
+		newblob = blob_alloc(chunking);
 		if (!newblob)
 			die("out of memory");
-		if (size > chunking)
-			die("alloc too big");
 		desc->total_bytes += chunking;
 		newblob->next = blob;
 		blob = newblob;
 		desc->blobs = newblob;
-		offset = offsetof(struct allocation_blob, data);
-		offset = (offset + alignment - 1) & ~(alignment-1);
 		blob->left = chunking - offset;
 		blob->offset = offset - offsetof(struct allocation_blob, data);
 	}
@@ -125,8 +125,8 @@ void show_allocations(struct allocator_struct *x)
 	fprintf(stderr, "%s: %d allocations, %lu bytes (%lu total bytes, "
 			"%6.2f%% usage, %6.2f average size)\n",
 		x->name, x->allocations, x->useful_bytes, x->total_bytes,
-		100 * (double) x->useful_bytes / x->total_bytes,
-		(double) x->useful_bytes / x->allocations);
+		100 * (double) x->useful_bytes / (x->total_bytes ?: 1),
+		(double) x->useful_bytes / (x->allocations ?: 1));
 }
 
 void get_allocator_stats(struct allocator_struct *x, struct allocator_stats *s)
