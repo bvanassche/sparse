@@ -227,7 +227,7 @@ ast_get_flags(GtkTreeModel *tree_model)
 static gint
 ast_get_n_columns(GtkTreeModel *tree_model)
 {
-	return 1;
+	return AST_N_COLUMNS;
 }
 
 
@@ -427,8 +427,11 @@ ast_iter_nth_child(GtkTreeModel *tree_model,
                         gint          n)
 {
 	AstNode    *node = parent ? parent->user_data : (AstNode*) tree_model;
-	GArray *array = node->childnodes;
-	if (n >= array->len)
+	GArray *array;
+
+	inspect_child_node(node);
+	array = node->childnodes;
+	if (n < 0 || n >= array->len)
 		return FALSE;
 	iter->user_data = g_array_index(array, AstNode *, n);
 	return TRUE;
