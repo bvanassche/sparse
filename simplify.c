@@ -40,6 +40,7 @@
 // * `SHIFT(x, S)` is used for `LSR(x, S)` or `SHL(x, S)`.
 
 #include <assert.h>
+#include <stdint.h>
 
 #include "parse.h"
 #include "expression.h"
@@ -1814,7 +1815,7 @@ static int canonical_order(pseudo_t p1, pseudo_t p2)
 		return 0;
 	switch (t1) {
 	case PSEUDO_SYM:
-		return p1->sym <= p2->sym;
+		return (uintptr_t)p1->sym <= (uintptr_t)p2->sym;
 	case PSEUDO_REG:
 	case PSEUDO_ARG:
 		return p1->nr <= p2->nr;

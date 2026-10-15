@@ -8,6 +8,7 @@
  */
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <assert.h>
 
 #include "symbol.h"
@@ -33,7 +34,7 @@ static int hash_list_cmp(const void *_a, const void *_b)
 	const struct storage_hash *a = _a;
 	const struct storage_hash *b = _b;
 	if (a->pseudo != b->pseudo)
-		return a->pseudo < b->pseudo ? -1 : 1;
+		return (uintptr_t)a->pseudo < (uintptr_t)b->pseudo ? -1 : 1;
 	return 0;
 }
 
@@ -118,7 +119,7 @@ static int storage_hash_cmp(const void *_a, const void *_b)
 	struct storage *bb = b->storage;
 
 	if (a->bb != b->bb)
-		return a->bb < b->bb ? -1 : 1;
+		return (uintptr_t)a->bb < (uintptr_t)b->bb ? -1 : 1;
 	if (a->inout != b->inout)
 		return a->inout < b->inout ? -1 : 1;
 	if (aa->type != bb->type)

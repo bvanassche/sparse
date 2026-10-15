@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <assert.h>
 
 #include "parse.h"
@@ -28,9 +29,9 @@ static int phi_compare(pseudo_t phi1, pseudo_t phi2)
 	const struct instruction *def2 = phi2->def;
 
 	if (def1->src1 != def2->src1)
-		return def1->src1 < def2->src1 ? -1 : 1;
+		return (uintptr_t)def1->src1 < (uintptr_t)def2->src1 ? -1 : 1;
 	if (def1->bb != def2->bb)
-		return def1->bb < def2->bb ? -1 : 1;
+		return (uintptr_t)def1->bb < (uintptr_t)def2->bb ? -1 : 1;
 	return 0;
 }
 
@@ -184,7 +185,7 @@ static int insn_compare(const void *_i1, const void *_i2)
 
 	case OP_SEL:
 		if (i1->src3 != i2->src3)
-			return i1->src3 < i2->src3 ? -1 : 1;
+			return (uintptr_t)i1->src3 < (uintptr_t)i2->src3 ? -1 : 1;
 		/* Fall-through to binops */
 
 	/* Binary arithmetic */
@@ -208,7 +209,7 @@ static int insn_compare(const void *_i1, const void *_i2)
 	case OP_FDIV:
 	case_binops:
 		if (i1->src2 != i2->src2)
-			return i1->src2 < i2->src2 ? -1 : 1;
+			return (uintptr_t)i1->src2 < (uintptr_t)i2->src2 ? -1 : 1;
 		/* Fall through to unops */
 
 	/* Unary */
@@ -216,17 +217,17 @@ static int insn_compare(const void *_i1, const void *_i2)
 	case OP_FNEG:
 	case OP_SYMADDR:
 		if (i1->src1 != i2->src1)
-			return i1->src1 < i2->src1 ? -1 : 1;
+			return (uintptr_t)i1->src1 < (uintptr_t)i2->src1 ? -1 : 1;
 		break;
 
 	case OP_LABEL:
 		if (i1->bb_true != i2->bb_true)
-			return i1->bb_true < i2->bb_true ? -1 : 1;
+			return (uintptr_t)i1->bb_true < (uintptr_t)i2->bb_true ? -1 : 1;
 		break;
 
 	case OP_SETVAL:
 		if (i1->val != i2->val)
-			return i1->val < i2->val ? -1 : 1;
+			return (uintptr_t)i1->val < (uintptr_t)i2->val ? -1 : 1;
 		break;
 
 	case OP_SETFVAL:
@@ -244,7 +245,7 @@ static int insn_compare(const void *_i1, const void *_i2)
 	case OP_PTRCAST:
 	case OP_UTPTR: case OP_PTRTU:
 		if (i1->src != i2->src)
-			return i1->src < i2->src ? -1 : 1;
+			return (uintptr_t)i1->src < (uintptr_t)i2->src ? -1 : 1;
 
 		// Note: if it can be guaranted that identical ->src
 		// implies identical orig_type->bit_size, then this
