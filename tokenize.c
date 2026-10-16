@@ -30,6 +30,7 @@
 #include <string.h>
 #include <ctype.h>
 #include <unistd.h>
+#include <limits.h>
 #include <stdint.h>
 
 #include "lib.h"
@@ -110,6 +111,25 @@ const char *show_ident(const struct ident *ident)
 	return buffer;
 }
 
+static char *grow_buffer(char **buf, size_t *cap, size_t needed)
+{
+	if (needed > *cap) {
+		size_t new_cap = *cap ? *cap : 4096;
+		while (new_cap < needed) {
+			if (new_cap > SIZE_MAX / 2) {
+				new_cap = needed;
+				break;
+			}
+			new_cap *= 2;
+		}
+		*buf = realloc(*buf, new_cap);
+		if (!*buf)
+			die("out of memory");
+		*cap = new_cap;
+	}
+	return *buf;
+}
+
 static char *charstr(char *ptr, unsigned char c, unsigned char escape, unsigned char next)
 {
 	if (isprint(c)) {
@@ -135,13 +155,18 @@ static char *charstr(char *ptr, unsigned char c, unsigned char escape, unsigned 
 
 const char *show_string(const struct string *string)
 {
-	static char buffer[4 * MAX_STRING + 3];
+	static char *buffer;
+	static size_t buf_size;
+	size_t len;
 	char *ptr;
 	int i;
 
 	if (!string || !string->length)
 		return "<bad_string>";
-	ptr = buffer;
+	len = string->length;
+	if (len > (SIZE_MAX - 3) / 4)
+		die("out of memory");
+	ptr = grow_buffer(&buffer, &buf_size, 4 * len + 3);
 	*ptr++ = '"';
 	for (i = 0; i < string->length-1; i++) {
 		const char *p = string->data + i;
@@ -155,10 +180,15 @@ const char *show_string(const struct string *string)
 static const char *show_char(const char *s, size_t len, const char *prefix,
 			     char delim)
 {
-	static char buffer[MAX_STRING + 8];
-	char *p = buffer;
-	if (prefix) {
-		size_t plen = strlen(prefix);
+	static char *buffer;
+	static size_t buf_size;
+	size_t plen = prefix ? strlen(prefix) : 0;
+	char *p;
+
+	if (len > SIZE_MAX - plen - 3)
+		die("out of memory");
+	p = grow_buffer(&buffer, &buf_size, plen + len + 3);
+	if (plen) {
 		memcpy(p, prefix, plen);
 		p += plen;
 	}
@@ -173,11 +203,16 @@ static const char *show_char(const char *s, size_t len, const char *prefix,
 static const char *quote_char(const char *s, size_t len, const char *prefix,
 			      char delim)
 {
-	static char buffer[2 * MAX_STRING + 8];
+	static char *buffer;
+	static size_t buf_size;
+	size_t plen = prefix ? strlen(prefix) : 0;
 	size_t i;
-	char *p = buffer;
-	if (prefix) {
-		size_t plen = strlen(prefix);
+	char *p;
+
+	if (len > (SIZE_MAX - plen - 6) / 2)
+		die("out of memory");
+	p = grow_buffer(&buffer, &buf_size, plen + 2 * len + 6);
+	if (plen) {
 		memcpy(p, prefix, plen);
 		p += plen;
 	}
@@ -661,18 +696,20 @@ static int get_one_number(int c, int next, stream_t *stream)
 
 static int eat_string(int next, stream_t *stream, enum token_type type)
 {
-	static char buffer[MAX_STRING];
+	static char *buffer;
+	static size_t buf_size;
 	struct string *string;
 	struct token *token = stream->token;
-	int len = 0;
+	size_t len = 0;
 	int escape;
 	int want_hex = 0;
 	char delim = type < TOKEN_STRING ? '\'' : '"';
 
 	for (escape = 0; escape || next != delim; next = nextchar(stream)) {
-		if (len < MAX_STRING)
-			buffer[len] = next;
-		len++;
+		if (len >= INT_MAX - sizeof(struct string))
+			die("string too large");
+		grow_buffer(&buffer, &buf_size, len + 4 < 64 ? 64 : len + 4);
+		buffer[len++] = next;
 		if (next == '\n') {
 			warning(stream_pos(stream),
 				"missing terminating %c character", delim);
@@ -698,20 +735,17 @@ static int eat_string(int next, stream_t *stream, enum token_type type)
 	if (want_hex)
 		warning(stream_pos(stream),
 			"\\x used with no following hex digits");
-	if (len > MAX_STRING) {
-		warning(stream_pos(stream), "string too long (%d bytes, %d bytes max)", len, MAX_STRING);
-		len = MAX_STRING;
-	}
 	if (delim == '\'' && len && len <= 4) {
 		token_type(token) = type + len;
 		memset(buffer + len, '\0', 4 - len);
 		memcpy(token->embedded, buffer, 4);
 	} else {
 		token_type(token) = type;
-		string = __alloc_string(len+1);
-		memcpy(string->data, buffer, len);
+		string = __alloc_string(len + 1);
+		if (len)
+			memcpy(string->data, buffer, len);
 		string->data[len] = '\0';
-		string->length = len+1;
+		string->length = len + 1;
 		token->string = string;
 	}
 

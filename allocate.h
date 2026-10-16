@@ -5,6 +5,7 @@
 
 struct allocation_blob {
 	struct allocation_blob *next;
+	unsigned long size;
 	unsigned int left, offset;
 	unsigned char data[];
 };

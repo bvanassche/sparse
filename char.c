@@ -1,3 +1,6 @@
+#include <limits.h>
+#include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include "target.h"
 #include "lib.h"
@@ -171,6 +174,22 @@ void get_char_constant(struct token *token, unsigned long long *val)
 	*val = v;
 }
 
+static void append_string_byte(char **buf, size_t *cap, size_t *len, char ch)
+{
+	if (*len >= INT_MAX - sizeof(struct string))
+		die("string too large");
+	if (*len + 1 > *cap) {
+		size_t new_cap = *cap ? *cap * 2 : 4096;
+		if (new_cap < *len + 1)
+			new_cap = *len + 1;
+		*buf = realloc(*buf, new_cap);
+		if (!*buf)
+			die("out of memory");
+		*cap = new_cap;
+	}
+	(*buf)[(*len)++] = ch;
+}
+
 struct token *get_string_constant(struct token *token, struct expression *expr)
 {
 	struct string *string = token->string;
@@ -178,8 +197,9 @@ struct token *get_string_constant(struct token *token, struct expression *expr)
 	int stringtype = token_type(token);
 	int is_wide = stringtype == TOKEN_WIDE_STRING;
 	int is_utf8 = stringtype == TOKEN_UTF8_STRING;
-	static char buffer[MAX_STRING];
-	int len = 0;
+	static char *buffer;
+	static size_t buf_size;
+	size_t len = 0;
 	int bits;
 	int esc_count = 0;
 
@@ -219,29 +239,21 @@ struct token *get_string_constant(struct token *token, struct expression *expr)
 			if (is_ucn && !is_wide) {
 				char utf8[4];
 				int i, n = encode_utf8(v, utf8);
-				for (i = 0; i < n; i++) {
-					if (len < MAX_STRING)
-						buffer[len] = utf8[i];
-					len++;
-				}
+				for (i = 0; i < n; i++)
+					append_string_byte(&buffer, &buf_size, &len, utf8[i]);
 			} else {
-				if (len < MAX_STRING)
-					buffer[len] = v;
-				len++;
+				append_string_byte(&buffer, &buf_size, &len, v);
 			}
 		}
 		token = token->next;
 	}
-	if (len > MAX_STRING) {
-		warning(token->pos, "trying to concatenate %d-character string (%d bytes max)", len, MAX_STRING);
-		len = MAX_STRING;
-	}
 
 	if (esc_count || len >= string->length) {
 		if (string->immutable || len >= string->length)	/* can't cannibalize */
-			string = __alloc_string(len+1);
-		string->length = len+1;
-		memcpy(string->data, buffer, len);
+			string = __alloc_string(len + 1);
+		string->length = len + 1;
+		if (len)
+			memcpy(string->data, buffer, len);
 		string->data[len] = '\0';
 	}
 	expr->string = string;
