@@ -246,7 +246,7 @@ static struct symbol_op bswap_op = {
 };
 
 
-#define EXPAND_FINDBIT(name)					\
+#define EXPAND_FINDBIT(name, zero_is_ub)			\
 static int expand_##name(struct expression *expr, int cost)	\
 {								\
 	struct expression *arg;					\
@@ -257,6 +257,8 @@ static int expand_##name(struct expression *expr, int cost)	\
 								\
 	arg = first_expression(expr->args);			\
 	val = get_expression_value_silent(arg);			\
+	if (zero_is_ub && !val)					\
+		return SIDE_EFFECTS;				\
 	switch (arg->ctype->bit_size) {				\
 	case sizeof(int) * 8:					\
 		val = __builtin_##name(val); break;		\
@@ -277,12 +279,12 @@ static struct symbol_op name##_op = {				\
 	.expand = expand_##name,				\
 }
 
-EXPAND_FINDBIT(clz);
-EXPAND_FINDBIT(ctz);
-EXPAND_FINDBIT(clrsb);
-EXPAND_FINDBIT(ffs);
-EXPAND_FINDBIT(parity);
-EXPAND_FINDBIT(popcount);
+EXPAND_FINDBIT(clz, 1);
+EXPAND_FINDBIT(ctz, 1);
+EXPAND_FINDBIT(clrsb, 0);
+EXPAND_FINDBIT(ffs, 0);
+EXPAND_FINDBIT(parity, 0);
+EXPAND_FINDBIT(popcount, 0);
 
 static int evaluate_fp_unop(struct expression *expr)
 {
