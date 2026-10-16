@@ -30,6 +30,7 @@
  * efficient: allocate larger "blobs", and give out individual
  * small bits and pieces of it with no maintenance overhead.
  */
+#include <limits.h>
 #include <stdlib.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -60,7 +61,7 @@ void drop_all_allocations(struct allocator_struct *desc)
 	desc->freelist = NULL;
 	while (blob) {
 		struct allocation_blob *next = blob->next;
-		blob_free(blob, desc->chunking);
+		blob_free(blob, blob->size);
 		blob = next;
 	}
 }
@@ -97,22 +98,32 @@ void *allocate(struct allocator_struct *desc, unsigned int size)
 	desc->useful_bytes += size;
 	size = (size + alignment - 1) & ~(alignment-1);
 	if (!blob || blob->left < size) {
-		unsigned int offset, chunking = desc->chunking;
+		unsigned long offset, chunking = desc->chunking;
 		struct allocation_blob *newblob;
 
 		offset = offsetof(struct allocation_blob, data);
 		offset = (offset + alignment - 1) & ~(alignment-1);
-		if (size > chunking - offset)
-			die("alloc too big");
+		if (size > chunking - offset) {
+			unsigned long need = (unsigned long)size + offset;
+			chunking = (need + chunking - 1) & ~(chunking - 1);
+			if (chunking < need || chunking - offset > UINT_MAX)
+				die("alloc too big");
+		}
 		newblob = blob_alloc(chunking);
 		if (!newblob)
 			die("out of memory");
 		desc->total_bytes += chunking;
-		newblob->next = blob;
+		newblob->size = chunking;
+		newblob->left = chunking - offset;
+		newblob->offset = offset - offsetof(struct allocation_blob, data);
+		if (blob && blob->left > newblob->left - size) {
+			newblob->next = blob->next;
+			blob->next = newblob;
+		} else {
+			newblob->next = blob;
+			desc->blobs = newblob;
+		}
 		blob = newblob;
-		desc->blobs = newblob;
-		blob->left = chunking - offset;
-		blob->offset = offset - offsetof(struct allocation_blob, data);
 	}
 	retval = blob->data + blob->offset;
 	blob->offset += size;

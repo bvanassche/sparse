@@ -34,6 +34,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <stdint.h>
 #include <time.h>
 #include <errno.h>
 #include <sys/stat.h>
@@ -420,38 +421,65 @@ static struct token *dup_list(struct token *list)
 
 static const char *show_token_sequence(struct token *token, int quote)
 {
-	static char buffer[MAX_STRING];
-	char *ptr = buffer;
-	int whitespace = 0;
+	static char *buffer;
+	static size_t buf_size;
+	size_t offset = 0;
+	size_t whitespace = 0;
 
 	if (!token && !quote)
 		return "<none>";
 	while (!eof_token(token)) {
 		const char *val = quote ? quote_token(token) : show_token(token);
-		int len = strlen(val);
+		size_t len = strlen(val);
+		size_t needed;
 
-		if (ptr + whitespace + len >= buffer + sizeof(buffer)) {
-			sparse_error(token->pos, "too long token expansion");
-			break;
+		if (len > SIZE_MAX - offset - whitespace - 1)
+			die("out of memory");
+		needed = offset + whitespace + len + 1;
+
+		if (needed > buf_size) {
+			size_t new_size = buf_size ? buf_size : 65536;
+			while (new_size < needed) {
+				if (new_size > SIZE_MAX / 2) {
+					new_size = needed;
+					break;
+				}
+				new_size *= 2;
+			}
+			buffer = realloc(buffer, new_size);
+			if (!buffer)
+				die("out of memory");
+			buf_size = new_size;
 		}
 
 		if (whitespace)
-			*ptr++ = ' ';
-		memcpy(ptr, val, len);
-		ptr += len;
+			buffer[offset++] = ' ';
+		memcpy(buffer + offset, val, len);
+		offset += len;
 		token = token->next;
 		whitespace = token->pos.whitespace;
 	}
-	*ptr = 0;
+	if (!buffer) {
+		buf_size = 64;
+		buffer = malloc(buf_size);
+		if (!buffer)
+			die("out of memory");
+	}
+	buffer[offset] = 0;
 	return buffer;
 }
 
 static struct token *stringify(struct token *arg)
 {
 	const char *s = show_token_sequence(arg, 1);
-	int size = strlen(s)+1;
-	struct token *token = __alloc_token(0);
-	struct string *string = __alloc_string(size);
+	size_t size = strlen(s) + 1;
+	struct token *token;
+	struct string *string;
+
+	if (size > INT_MAX - sizeof(struct string))
+		die("string too large");
+	token = __alloc_token(0);
+	string = __alloc_string(size);
 
 	memcpy(string->data, s, size);
 	string->length = size;
