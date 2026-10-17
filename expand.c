@@ -850,6 +850,7 @@ static int expand_conditional(struct expression *expr)
 
 	cond_cost = expand_expression(cond);
 	if (cond->type == EXPR_VALUE) {
+		struct symbol *ctype = expr->ctype;
 		unsigned flags = expr->flags;
 		if (!cond->value && !cond->value_hi)
 			valt = valf;
@@ -860,13 +861,27 @@ static int expand_conditional(struct expression *expr)
 		expr->flags = flags;
 		if (expr->type == EXPR_VALUE)
 			expr->taint |= cond->taint;
+		if (ctype == &void_ctype && expr->ctype != &void_ctype) {
+			if (expr->type == EXPR_VALUE || expr->type == EXPR_FVALUE) {
+				expr->type = EXPR_VALUE;
+				expr->value = 0;
+				expr->ctype = &void_ctype;
+			} else {
+				struct expression *sub = alloc_expression(expr->pos, expr->type);
+				*sub = *expr;
+				expr->type = EXPR_CAST;
+				expr->ctype = &void_ctype;
+				expr->cast_type = &void_ctype;
+				expr->cast_expression = sub;
+			}
+		}
 		return cost;
 	}
 
 	cost = expand_expression(valt);
 	cost += expand_expression(valf);
 
-	if (cost < SELECT_COST) {
+	if (expr->ctype != &void_ctype && cost < SELECT_COST) {
 		expr->type = EXPR_SELECT;
 		cost -= BRANCH_COST - 1;
 	}

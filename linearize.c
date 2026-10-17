@@ -1699,6 +1699,14 @@ static pseudo_t linearize_short_conditional(struct entrypoint *ep, struct expres
 	bb_false = alloc_basic_block(ep, expr_false->pos);
 	merge = alloc_basic_block(ep, expr->pos);
 
+	if (expr->ctype == &void_ctype || type_size(expr->ctype) <= 0) {
+		linearize_cond_branch(ep, cond, merge, bb_false);
+		set_activeblock(ep, bb_false);
+		linearize_expression(ep, expr_false);
+		set_activeblock(ep, merge);
+		return VOID;
+	}
+
 	src1 = linearize_expression(ep, cond);
 	phi1 = alloc_phi(ep->active, src1, expr->ctype);
 	add_branch(ep, src1, merge, bb_false);
@@ -1727,6 +1735,17 @@ static pseudo_t linearize_conditional(struct entrypoint *ep, struct expression *
 	merge = alloc_basic_block(ep, expr->pos);
 
 	linearize_cond_branch(ep, cond, bb_true, bb_false);
+
+	if (expr->ctype == &void_ctype || type_size(expr->ctype) <= 0) {
+		set_activeblock(ep, bb_true);
+		linearize_expression(ep, expr_true);
+		add_goto(ep, merge);
+
+		set_activeblock(ep, bb_false);
+		linearize_expression(ep, expr_false);
+		set_activeblock(ep, merge);
+		return VOID;
+	}
 
 	set_activeblock(ep, bb_true);
 	src1 = linearize_expression(ep, expr_true);
