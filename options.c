@@ -671,13 +671,59 @@ static char **handle_multiarch_dir(char *arg, char **next)
 	return next;
 }
 
+static int handle_mbitness(const char *arg, const char *opt, const struct flag *flag, int options)
+{
+	if (opt[0] != '\0' || (options & OPT_INVERSE))
+		return 0;
+	*flag->flag = flag->val;
+	if (arch_target->mach == MACH_I386 || arch_target->mach == MACH_X86_64) {
+		switch (flag->val) {
+		case ARCH_LP32:
+			add_pre_buffer("#undef __x86_64__\n"
+				       "#undef __x86_64\n"
+				       "#undef __amd64__\n"
+				       "#undef __amd64\n"
+				       "#ifndef __i386__\n"
+				       "#define __i386__ 1\n"
+				       "#endif\n"
+				       "#ifndef __i386\n"
+				       "#define __i386 1\n"
+				       "#endif\n"
+				       "#if !defined(__STRICT_ANSI__) && !defined(i386)\n"
+				       "#define i386 1\n"
+				       "#endif\n");
+			break;
+		case ARCH_LP64:
+		case ARCH_X32:
+		case ARCH_LLP64:
+			add_pre_buffer("#undef __i386__\n"
+				       "#undef __i386\n"
+				       "#undef i386\n"
+				       "#ifndef __x86_64__\n"
+				       "#define __x86_64__ 1\n"
+				       "#endif\n"
+				       "#ifndef __x86_64\n"
+				       "#define __x86_64 1\n"
+				       "#endif\n"
+				       "#ifndef __amd64__\n"
+				       "#define __amd64__ 1\n"
+				       "#endif\n"
+				       "#ifndef __amd64\n"
+				       "#define __amd64 1\n"
+				       "#endif\n");
+			break;
+		}
+	}
+	return 1;
+}
+
 static const struct flag mflags[] = {
-	{ "64", &arch_m64, NULL, OPT_VAL, ARCH_LP64 },
-	{ "32", &arch_m64, NULL, OPT_VAL, ARCH_LP32 },
-	{ "31", &arch_m64, NULL, OPT_VAL, ARCH_LP32 },
-	{ "16", &arch_m64, NULL, OPT_VAL, ARCH_LP32 },
-	{ "x32",&arch_m64, NULL, OPT_VAL, ARCH_X32 },
-	{ "size-llp64", &arch_m64, NULL, OPT_VAL, ARCH_LLP64 },
+	{ "64", &arch_m64, handle_mbitness, OPT_VAL, ARCH_LP64 },
+	{ "32", &arch_m64, handle_mbitness, OPT_VAL, ARCH_LP32 },
+	{ "31", &arch_m64, handle_mbitness, OPT_VAL, ARCH_LP32 },
+	{ "16", &arch_m64, handle_mbitness, OPT_VAL, ARCH_LP32 },
+	{ "x32",&arch_m64, handle_mbitness, OPT_VAL, ARCH_X32 },
+	{ "size-llp64", &arch_m64, handle_mbitness, OPT_VAL, ARCH_LLP64 },
 	{ "size-long", &arch_msize_long },
 	{ "arch=", NULL, handle_march },
 	{ "big-endian", &arch_big_endian, NULL },
