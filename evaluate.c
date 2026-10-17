@@ -1421,6 +1421,37 @@ static struct symbol *evaluate_conditional_expression(struct expression *expr)
 
 	lclass = classify_type(ltype, &ltype);
 	rclass = classify_type(rtype, &rtype);
+
+	/*
+	 * GNU extension supported by gcc and clang: if exactly one of the
+	 * second and third operands has type void, the result has type void
+	 * and the other operand is only evaluated for its side effects.
+	 * ISO C forbids this [6.5.15(3)].
+	 */
+	if ((ltype == &void_ctype) != (rtype == &void_ctype)) {
+		struct symbol *other_type = (ltype == &void_ctype) ? rtype : ltype;
+
+		if (!valid_type(other_type)) {
+			expr->flags = CEF_NONE;
+			expr->ctype = &bad_ctype;
+			return NULL;
+		}
+		if (other_type == &incomplete_ctype || other_type->bit_size < 0 ||
+		    ((other_type->type == SYM_STRUCT || other_type->type == SYM_UNION) &&
+		     !other_type->defined)) {
+			expression_error(expr, "expression has incomplete type '%s'",
+					 show_typename(other_type));
+			return NULL;
+		}
+		if (Wpedantic)
+			warning(expr->pos, "ISO C forbids conditional expression with only one void side");
+		if (expr->cond_true)
+			*cond = cast_to(*cond, &void_ctype);
+		expr->cond_false = cast_to(expr->cond_false, &void_ctype);
+		ctype = &void_ctype;
+		goto out;
+	}
+
 	if (lclass & rclass & TYPE_NUM) {
 		ctype = usual_conversions('?', *cond, expr->cond_false,
 					  lclass, rclass, ltype, rtype);
@@ -3127,7 +3158,8 @@ static void check_constexpr_scalar_init(struct expression *orig,
 		}
 		tmp = *orig;
 		if (!is_null_pointer_constant(&tmp) &&
-		    !(((sclass & TYPE_PTR) || is_nullptr_type(stype)) && is_zero_constant(&tmp)))
+		    !(((sclass & TYPE_PTR) || is_nullptr_type(stype)) &&
+		      is_zero_constant(&tmp)))
 			sparse_error(orig->pos,
 				     "constexpr pointer initializer is not null");
 		return;
@@ -3309,7 +3341,6 @@ static int handle_initializer(struct expression **ep, int nested,
 		struct expression orig;
 
 		e = handle_scalar(e, nested, class, ctype);
-
 		if (!e)
 			return 0;
 		*ep = e;
@@ -3323,11 +3354,11 @@ static int handle_initializer(struct expression **ep, int nested,
 		 * shall be constant expressions or a string literal [6.7.8(4)].
 		 */
 		mods |= ctype->ctype.modifiers;
-		if (mods & MOD_CONSTEXPR)
+		if (mods & MOD_CONSTEXPR) {
 			check_constexpr_scalar_init(&orig, ctype);
-		else if ((mods & (MOD_TOPLEVEL | MOD_STATIC | MOD_TLS)) &&
-			 valid_type(ctype->ctype.base_type) &&
-			 !(e->flags & (CEF_ACE | CEF_ADDR))) {
+		} else if ((mods & (MOD_TOPLEVEL | MOD_STATIC | MOD_TLS)) &&
+			   valid_type(ctype->ctype.base_type) &&
+			   !(e->flags & (CEF_ACE | CEF_ADDR))) {
 			if (standard >= STANDARD_C23)
 				sparse_error(e->pos, "non-constant initializer for static object");
 			else if (Wconstexpr_not_const)
@@ -4187,6 +4218,41 @@ void check_duplicates(struct symbol *sym)
 	}
 }
 
+static void evaluate_cleanup(struct symbol *sym)
+{
+	struct expression *var_expr, *addr_expr, *fn_expr, *call;
+
+	if (!sym->cleanup || sym->cleanup->type != EXPR_SYMBOL)
+		return;
+
+	if (sym->ctype.modifiers & (MOD_TOPLEVEL | MOD_STATIC | MOD_EXTERN)) {
+		sparse_error(sym->pos, "cleanup attribute may only be applied to local variables");
+		sym->cleanup = NULL;
+		return;
+	}
+
+	var_expr = alloc_expression(sym->pos, EXPR_SYMBOL);
+	var_expr->symbol = sym;
+	var_expr->symbol_name = sym->ident;
+	evaluate_expression(var_expr);
+
+	addr_expr = alloc_expression(sym->pos, EXPR_PREOP);
+	addr_expr->op = '&';
+	addr_expr->unop = var_expr;
+	evaluate_expression(addr_expr);
+
+	fn_expr = alloc_expression(sym->cleanup->pos, EXPR_SYMBOL);
+	fn_expr->symbol = sym->cleanup->symbol;
+	fn_expr->symbol_name = sym->cleanup->symbol_name;
+
+	call = alloc_expression(sym->pos, EXPR_CALL);
+	call->fn = fn_expr;
+	add_expression(&call->args, addr_expr);
+	evaluate_call(call);
+
+	sym->cleanup = call;
+}
+
 static bool check_constexpr_vm_type(struct symbol *type)
 {
 	while (type) {
@@ -4234,41 +4300,6 @@ static bool has_invalid_constexpr_qualifiers(struct symbol *type)
 		}
 	}
 	return false;
-}
-
-static void evaluate_cleanup(struct symbol *sym)
-{
-	struct expression *var_expr, *addr_expr, *fn_expr, *call;
-
-	if (!sym->cleanup || sym->cleanup->type != EXPR_SYMBOL)
-		return;
-
-	if (sym->ctype.modifiers & (MOD_TOPLEVEL | MOD_STATIC | MOD_EXTERN)) {
-		sparse_error(sym->pos, "cleanup attribute may only be applied to local variables");
-		sym->cleanup = NULL;
-		return;
-	}
-
-	var_expr = alloc_expression(sym->pos, EXPR_SYMBOL);
-	var_expr->symbol = sym;
-	var_expr->symbol_name = sym->ident;
-	evaluate_expression(var_expr);
-
-	addr_expr = alloc_expression(sym->pos, EXPR_PREOP);
-	addr_expr->op = '&';
-	addr_expr->unop = var_expr;
-	evaluate_expression(addr_expr);
-
-	fn_expr = alloc_expression(sym->cleanup->pos, EXPR_SYMBOL);
-	fn_expr->symbol = sym->cleanup->symbol;
-	fn_expr->symbol_name = sym->cleanup->symbol_name;
-
-	call = alloc_expression(sym->pos, EXPR_CALL);
-	call->fn = fn_expr;
-	add_expression(&call->args, addr_expr);
-	evaluate_call(call);
-
-	sym->cleanup = call;
 }
 
 static struct symbol *evaluate_symbol(struct symbol *sym)
