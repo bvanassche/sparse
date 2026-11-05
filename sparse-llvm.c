@@ -1182,7 +1182,11 @@ static void output_fn(LLVMModuleRef module, struct entrypoint *ep)
 	LLVMSetFunctionCallConv(function.fn, LLVMCCallConv);
 	LLVMSetLinkage(function.fn, function_linkage(sym));
 
+#if LLVM_VERSION_MAJOR > 23
+	function.builder = LLVMCreateBuilderForModule(module);
+#else
 	function.builder = LLVMCreateBuilderInContext(context);
+#endif
 
 	/* give a name to each argument */
 	nr_args = symbol_list_size(base_type->arguments);
